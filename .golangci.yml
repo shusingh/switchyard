@@ -17,6 +17,10 @@ linters:
     - unparam
     - usestdlibvars
   settings:
+    errcheck:
+      exclude-functions:
+        # Closing an HTTP response body cannot fail in a way callers can act on.
+        - (io.ReadCloser).Close
     revive:
       rules:
         - name: exported
