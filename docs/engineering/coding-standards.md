@@ -109,7 +109,7 @@ formatters:
   what they need).
 - Files stay focused; split around 500 lines. Order within a file: types and
   constructors first, then methods, then helpers.
-- No circular dependencies; respect the dependency direction in DESIGN
+- No circular dependencies; respect the dependency direction in design.md
   section 5.
 
 ## 5. Naming
@@ -141,8 +141,8 @@ too many and the signal drowns.
   never hashed.").
 - Lock ownership on every struct with a mutex: which fields the mutex guards.
 - Units and ranges on fields and parameters when not carried by the type.
-- A link to the DESIGN section for non-trivial algorithms
-  (`// See DESIGN.md section 9.`).
+- A link to the design.md section for non-trivial algorithms
+  (`// See design.md section 9.`).
 
 **Forbidden**
 
@@ -257,8 +257,8 @@ too many and the signal drowns.
 
 ## 13. Dependencies
 
-- Standard library first. Each external dependency needs an entry in the DESIGN
-  decision log stating why the stdlib is insufficient.
+- Standard library first. Each external dependency needs an ADR in `docs/adr/`
+  stating why the stdlib is insufficient.
 - Pre-approved: `github.com/prometheus/client_golang` (metrics),
   `go.yaml.in/yaml/v3` (config), `github.com/google/go-cmp` and
   `go.uber.org/goleak` (tests only). Phase 8 only: `github.com/go-zeromq/zmq4`,
@@ -272,7 +272,7 @@ too many and the signal drowns.
 - The hot path is: decode minimal fields, key, match, pick, proxy relay.
   Allocations there are measured and justified.
 - Reuse buffers with `sync.Pool` only when a benchmark shows it helps.
-- Do not parse full response JSON on the stream path; inspect only what DESIGN
+- Do not parse full response JSON on the stream path; inspect only what design.md
   section 11 requires.
 - Measure before and after any optimization and record the numbers in the
   commit message.
@@ -290,7 +290,8 @@ too many and the signal drowns.
 
 - **Author:** the repo owner (`shusingh <ksingh.shubh@gmail.com>`). **No
   `Co-Authored-By` trailers, no "Generated with" lines, no tool attributions.**
-  A local `commit-msg` hook rejects messages that contain them.
+  `scripts/githooks/commit-msg` rejects messages that contain them;
+  `make setup` installs it.
 - Message format ([Conventional Commits](https://www.conventionalcommits.org/)
   style):
 
@@ -310,7 +311,7 @@ too many and the signal drowns.
 
 ## 17. Review checklist (self-review before every commit)
 
-- [ ] Does it do one thing, and is that thing in PLAN.md?
+- [ ] Does it do one thing, and is that thing in plan.md?
 - [ ] Are errors wrapped with context and handled once?
 - [ ] Does every goroutine have an exit path tied to a context?
 - [ ] Are all HTTP bodies closed and all requests context-bound?
@@ -318,5 +319,5 @@ too many and the signal drowns.
 - [ ] Are there tests for the new behavior, including an error path?
 - [ ] Did `go vet`, `golangci-lint run`, and `go test -race ./...` pass?
 - [ ] Is anything logged that could contain prompt content? (It must not be.)
-- [ ] Are DESIGN, PLAN, and HANDOFF updated if needed?
+- [ ] Are design.md, plan.md, and handoff.md updated if needed?
 - [ ] Does the commit message follow section 16?

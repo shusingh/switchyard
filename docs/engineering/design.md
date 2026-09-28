@@ -7,7 +7,8 @@
 
 Status: **Draft v1** (planning phase). This document is the source of truth for
 architecture. When an implementation decision changes it, update this file in
-the same commit and add an entry to the [Decision log](#15-decision-log).
+the same commit, and record significant decisions as a new ADR (see
+[section 15](#15-decision-log)).
 
 ---
 
@@ -108,7 +109,7 @@ The router has to **trade cache reuse against load**, request by request.
 ## 3. Background: how prefix caching works
 
 Facts the design depends on (vLLM v1; verify against the installed version in
-Phase 0 and record any differences in the decision log):
+Phase 0 and record any differences in a new ADR):
 
 - **Block granularity.** The KV cache is split into fixed-size blocks of tokens
   (`--block-size`, commonly 16). Only **full** blocks are cached and reused.
@@ -224,39 +225,91 @@ What Switchyard does differently (the portfolio angle):
    "pending" to "decoding". On completion, release counters, record usage and
    latency metrics, and record prediction error (predicted vs actual TTFT).
 
-### Package layout
+### Repository layout
+
+The layout follows the official Go guidance for server projects
+([Organizing a Go module](https://go.dev/doc/modules/layout)): binaries under
+`cmd/`, all implementation under `internal/` so nothing becomes an accidental
+public API, and non-Go assets in clearly named top-level directories.
 
 ```text
-cmd/
-  switchyard/        router binary (main only: flags, config, wiring, signals)
-  simengine/         simulated OpenAI-compatible engine with a prefix cache model
-  loadgen/           open-loop workload replayer and recorder
-internal/
-  config/            config types, loading, validation, defaults
-  server/            HTTP handlers, OpenAI request/response types (minimal)
-  admission/         tenants, token buckets, fair queue, shedding
-  prefix/            canonicalization, block hashing, the prefix index
-  scheduler/         policies, cost model, candidate scoring, explanations
-  backend/           pool, health checks, circuit breakers, metrics scraper
-  proxy/             upstream transport, SSE relay, retries, cancellation
-  telemetry/         Prometheus metrics, slog setup, tracing hooks
-  sim/               engine model used by simengine (cache, latency, batching)
-  workload/          trace parsers (Mooncake), generators, prompt synthesis
-bench/
-  scenarios/         versioned scenario definitions
-  results/           raw JSONL results (large files git-ignored) and summaries
-  analysis/          scripts that turn JSONL into tables and plots
-deploy/
-  vllm/              scripts to launch N vLLM replicas under WSL2
-docs/                public-facing docs (README assets, methodology, results)
-_planning/           plan, design, coding standards, handoff
+switchyard/
+├── cmd/                      one directory per binary; main packages only
+│   ├── switchyard/           the router: flags, config, wiring, signal handling
+│   ├── simengine/            simulated OpenAI-compatible engine (tests, experiments)
+│   └── loadgen/              open-loop workload replayer, recorder, and reporter
+├── internal/                 all implementation; not importable by other modules
+│   ├── openai/               wire types for the subset of the OpenAI API we touch,
+│   │                         error bodies, SSE event reader and writer
+│   ├── config/               config types, loading, defaults, validation
+│   ├── server/               HTTP handlers, middleware, request lifecycle
+│   ├── admission/            tenants, token buckets, fair queue, shedding
+│   ├── prefix/               canonicalization, block hashing, the prefix index
+│   ├── scheduler/            policies, cost model, load tracking, explanations
+│   ├── backend/              pool, health checks, circuit breakers, metrics scraper
+│   ├── proxy/                upstream transport, streaming relay, retries
+│   ├── telemetry/            Prometheus registry, logger construction, tracing
+│   ├── sim/                  engine model behind simengine (cache, latency, batching)
+│   └── workload/             trace parsers, generators, prompt synthesis
+├── test/
+│   └── e2e/                  black-box tests that run the real binaries
+│                             (build tag `e2e`; excluded from the default test run)
+├── configs/                  example configuration files, documented inline
+├── deploy/
+│   └── vllm/                 scripts and notes for running vLLM replicas
+├── bench/
+│   ├── scenarios/            versioned benchmark scenario definitions
+│   ├── analysis/             scripts that turn raw results into tables and plots
+│   └── results/              committed summaries; raw JSONL is git-ignored
+├── scripts/                  developer scripts (environment setup, git hooks)
+├── docs/
+│   ├── adr/                  architecture decision records, numbered, immutable
+│   ├── engineering/          design, plan, coding standards, session handoff
+│   └── *.md                  user-facing docs: configuration, benchmarks, operations
+├── .github/workflows/        CI (added with the first Go package in Phase 1)
+├── Makefile                  the single entry point for build, test, lint, bench
+├── .golangci.yml             linter configuration (see coding-standards.md)
+├── .editorconfig             whitespace and line-ending rules for all editors
+├── CONTRIBUTING.md           how to set up, build, test, and submit changes
+├── README.md
+└── LICENSE
 ```
 
-Dependency direction: `cmd` wires `internal` packages; `server` depends on
-`admission`, `scheduler`, `proxy`; `scheduler` depends on `prefix` and
-`backend`; nothing in `internal` imports `cmd`. Interfaces are declared by the
-consumer (for example, `scheduler` declares the small interface it needs from
-the load tracker).
+Rules that keep the layout honest:
+
+- **Packages are created when they get code**, each with a `doc.go` package
+  comment stating its single responsibility. Empty placeholder packages are not
+  committed.
+- **Tests live next to the code they test** (`foo_test.go` beside `foo.go`).
+  Test fixtures live in a `testdata/` directory inside the package, which the Go
+  tool ignores. Only whole-system tests that launch real binaries go in
+  `test/e2e/`.
+- **No `pkg/` directory.** Nothing here is meant to be imported by other
+  modules. If that changes, the package moves out of `internal/` deliberately.
+- **No grab-bag packages** (`util`, `common`, `helpers`). Shared test helpers
+  live in an `internal/<area>/<area>test` package (for example,
+  `internal/sim/simtest`), following the standard library's `httptest` pattern.
+- **Binaries stay thin.** A `main` package parses flags, builds dependencies,
+  and calls into `internal/`. Anything worth testing lives in `internal/`.
+
+### Package dependencies
+
+```text
+cmd/switchyard ──> server ──> admission
+                     │  └───> scheduler ──> prefix
+                     │            └───────> backend
+                     └──────> proxy ─────> backend
+      (all of the above) ──> openai, config, telemetry
+
+cmd/simengine ──> sim ──> openai, prefix (shared canonicalization)
+cmd/loadgen   ──> workload ──> openai
+```
+
+Dependencies point one way; there are no cycles, and nothing in `internal/`
+imports a `cmd/` package. Interfaces are declared by the consumer (for
+example, `scheduler` declares the small interface it needs from `backend`).
+`openai` is a leaf package with no internal dependencies, so the router, the
+simulator, and the load generator all speak exactly the same wire format.
 
 ## 6. Prefix keys: turning a request into block hashes
 
@@ -653,15 +706,20 @@ measurements.
 
 ## 15. Decision log
 
-| # | Date | Decision | Why | Alternatives considered |
-|---|---|---|---|---|
-| D1 | 2026-09-28 | Go for the router, simulator, and load generator | Strong concurrency and HTTP stdlib, single static binary, matches the ecosystem (llm-d, GAIE are Go) | Rust (slower to build), Python (GIL, overhead on the hot path) |
-| D2 | 2026-09-28 | Approximate byte-block hashing in v1; precise KV-event mode is a stretch goal | No tokenizer dependency, works with any engine, fast. Precise mode's hash compatibility is a real risk to de-risk separately | Tokenize in router (heavy, model-specific) |
-| D3 | 2026-09-28 | Route on estimated TTFT in seconds | Calibratable and checkable against measured TTFT; handles hot prefixes without special cases | Weighted unitless scores (SGLang, GAIE style) |
-| D4 | 2026-09-28 | Build a simulator alongside the real benchmark | CI without GPUs, fault injection, larger pools; GPU runs validate it | GPU-only testing (slow, cannot run in CI) |
-| D5 | 2026-09-28 | Open-loop load generation | Avoids coordinated omission, which hides queueing | Closed loop, as in many quick benchmarks |
-| D6 | 2026-09-28 | Stdlib first: `net/http`, `log/slog`, `hash/maphash`; each external dependency must be justified here | Smaller attack surface, fewer upgrades, clearer code | Frameworks (gin, echo), zap/zerolog |
-| D7 | 2026-09-28 | Go 1.27 toolchain | Current stable release as of 2026-09 | Staying on the locally installed 1.23 |
+Significant decisions are recorded as architecture decision records in
+[`docs/adr/`](../adr/README.md). This table is the index. To change a decision,
+write a new ADR that supersedes the old one; do not edit accepted ADRs.
+
+| ADR | Decision | Status |
+|---|---|---|
+| [0001](../adr/0001-record-architecture-decisions.md) | Record architecture decisions as ADRs | Accepted |
+| [0002](../adr/0002-use-go.md) | Use Go for the router, simulator, and load generator | Accepted |
+| [0003](../adr/0003-approximate-byte-block-prefix-hashing.md) | Key prefixes by hashing canonical bytes, not tokens | Accepted |
+| [0004](../adr/0004-route-on-estimated-ttft.md) | Route on estimated time to first token | Accepted |
+| [0005](../adr/0005-build-a-simulated-engine.md) | Build a simulated engine alongside real benchmarks | Accepted |
+| [0006](../adr/0006-open-loop-load-generation.md) | Generate load open-loop | Accepted |
+| [0007](../adr/0007-standard-library-first.md) | Prefer the standard library; justify every dependency | Accepted |
+| [0008](../adr/0008-go-1-27-toolchain.md) | Target the Go 1.27 toolchain | Accepted |
 
 ## 16. Open questions and risks
 
