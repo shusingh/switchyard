@@ -14,8 +14,10 @@ BINARIES      := switchyard simengine loadgen
 
 ifeq ($(OS),Windows_NT)
   EXE    := .exe
-  # Resolve WSL through Sysnative so 32-bit shells reach the 64-bit binary.
-  LINUX  := /c/Windows/Sysnative/wsl.exe -d Ubuntu-24.04 --cd "$(CURDIR)" --
+  # 64-bit shells find wsl.exe on PATH; 32-bit shells only see it through
+  # Sysnative, because System32 is redirected for them.
+  WSL    := $(shell command -v wsl.exe 2>/dev/null || echo /c/Windows/Sysnative/wsl.exe)
+  LINUX  := $(WSL) -d Ubuntu-24.04 --cd "$(CURDIR)" --
 else
   EXE    :=
   LINUX  :=
@@ -37,15 +39,15 @@ build: ## Build all binaries into ./bin.
 
 .PHONY: test
 test: ## Run unit and integration tests with the race detector.
-	$(GO) test -race -count=1 ./...
+	CGO_ENABLED=1 $(GO) test -race -count=1 ./...
 
 .PHONY: test-e2e
 test-e2e: build ## Run end-to-end tests against the built binaries.
-	$(GO) test -race -count=1 -tags e2e ./test/e2e/...
+	CGO_ENABLED=1 $(GO) test -race -count=1 -tags e2e ./test/e2e/...
 
 .PHONY: cover
 cover: ## Run tests with coverage and print the total.
-	$(GO) test -race -count=1 -coverprofile=coverage.out ./...
+	CGO_ENABLED=1 $(GO) test -race -count=1 -coverprofile=coverage.out ./...
 	$(GO) tool cover -func=coverage.out | tail -n 1
 
 .PHONY: bench

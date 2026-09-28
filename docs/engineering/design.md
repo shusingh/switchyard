@@ -670,16 +670,18 @@ measurements.
 
 ### 14.3 Benchmark methodology (GPU)
 
-- **Hardware:** RTX 4090 (24 GB) under WSL2, 4 vLLM replicas on the same GPU,
-  each limited to a fraction of memory (`--gpu-memory-utilization`) and a small
-  KV cache (`--num-gpu-blocks-override` or `--kv-cache-memory-bytes`, whichever
-  the installed vLLM supports) so the hot working set exceeds one replica's
-  cache but fits in the pool's.
-- **Model:** a small instruct model (for example, Qwen2.5-1.5B-Instruct) so four
-  replicas fit with room for KV cache. Record exact model, vLLM version, flags,
-  driver, and CUDA version with every result.
+- **Hardware and replicas (ADR 0009):** RTX 4090 (24 GB) under WSL2, four
+  vLLM 0.30.0 replicas of `Qwen/Qwen2.5-1.5B-Instruct` on the same GPU, each
+  with a fixed 1 GiB KV cache (`--kv-cache-memory-bytes`): exactly 2,340
+  blocks of 16 tokens, 37,440 tokens per replica, 149,760 in the pool. Hot
+  working sets are sized to exceed one replica's cache and fit in the pool.
+  Full versions and flags are recorded in `deploy/vllm/README.md` and must be
+  restated with every result.
+- **Cache reset:** `POST /reset_prefix_cache` (available with
+  `VLLM_SERVER_DEV_MODE=1`) empties each replica's cache between trials, so
+  no restart is needed.
 - **Procedure:** warm up, then for each policy and each arrival rate in a sweep,
-  run 3 trials, reset replica caches between trials (restart or reset endpoint),
+  run 3 trials, reset replica caches between trials,
   and report the median with min and max.
 - **Metrics reported:** TTFT p50/p90/p99, TPOT p50/p99, throughput (output
   tokens/s), goodput at a TTFT SLO, pool prefix-cache hit rate, router overhead.
@@ -720,6 +722,7 @@ write a new ADR that supersedes the old one; do not edit accepted ADRs.
 | [0006](../adr/0006-open-loop-load-generation.md) | Generate load open-loop | Accepted |
 | [0007](../adr/0007-standard-library-first.md) | Prefer the standard library; justify every dependency | Accepted |
 | [0008](../adr/0008-go-1-27-toolchain.md) | Target the Go 1.27 toolchain | Accepted |
+| [0009](../adr/0009-benchmark-replica-configuration.md) | Benchmark on four small replicas with fixed 1 GiB KV caches | Accepted |
 
 ## 16. Open questions and risks
 

@@ -14,3 +14,4 @@ Accepted ADRs are not edited; a new ADR supersedes an old one. See
 | [0006](0006-open-loop-load-generation.md) | Generate load open-loop | Accepted |
 | [0007](0007-standard-library-first.md) | Prefer the standard library; justify every dependency | Accepted |
 | [0008](0008-go-1-27-toolchain.md) | Target the Go 1.27 toolchain | Accepted |
+| [0009](0009-benchmark-replica-configuration.md) | Benchmark on four small replicas with fixed 1 GiB KV caches | Accepted |
