@@ -21,6 +21,10 @@ linters:
       exclude-functions:
         # Closing an HTTP response body cannot fail in a way callers can act on.
         - (io.ReadCloser).Close
+    gosec:
+      excludes:
+        # G104 duplicates errcheck, which owns unchecked-error policy above.
+        - G104
     revive:
       rules:
         - name: exported
