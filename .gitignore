@@ -1,0 +1,16 @@
+# Build output
+/bin/
+/dist/
+*.exe
+*.test
+*.out
+
+# Benchmark raw data (summaries are committed, raw JSONL is not)
+/bench/results/**/*.jsonl
+
+# Downloaded traces
+/bench/traces/
+
+# Local environment
+.env
+*.local.yaml
