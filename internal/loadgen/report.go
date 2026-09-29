@@ -8,9 +8,9 @@ import (
 	"time"
 )
 
-// Run is one benchmark run: its summary and the engines' measured cache hit
+// Result is one benchmark run: its summary and the engines' measured cache hit
 // rate, if it was recorded.
-type Run struct {
+type Result struct {
 	Label   string
 	Summary Summary
 	HitRate *float64
@@ -22,18 +22,18 @@ var trialSuffix = regexp.MustCompile(`\s*\(trial \d+\)$`)
 
 // Group returns the configuration a run belongs to: its label without any
 // trial marker.
-func (r Run) Group() string { return trialSuffix.ReplaceAllString(r.Label, "") }
+func (r Result) Group() string { return trialSuffix.ReplaceAllString(r.Label, "") }
 
 // column is one metric shown in a report table.
 type column struct {
 	title  string
-	value  func(Run) (float64, bool)
+	value  func(Result) (float64, bool)
 	format func(float64) string
 }
 
 func columns(slo time.Duration) []column {
-	always := func(f func(Summary) float64) func(Run) (float64, bool) {
-		return func(r Run) (float64, bool) { return f(r.Summary), true }
+	always := func(f func(Summary) float64) func(Result) (float64, bool) {
+		return func(r Result) (float64, bool) { return f(r.Summary), true }
 	}
 	return []column{
 		{"Requests", always(func(s Summary) float64 { return float64(s.Requests) }), func(v float64) string { return fmt.Sprintf("%.0f", v) }},
@@ -44,16 +44,16 @@ func columns(slo time.Duration) []column {
 		{"TTFT p99", always(func(s Summary) float64 { return s.TTFT.P99 }), millis},
 		{"TPOT p50", always(func(s Summary) float64 { return s.TPOT.P50 }), millis},
 		{"Output tok/s", always(func(s Summary) float64 { return s.OutputTokensPerSec }), func(v float64) string { return fmt.Sprintf("%.0f", v) }},
-		{"Cache hit rate", func(r Run) (float64, bool) {
+		{"Cache hit rate", func(r Result) (float64, bool) {
 			if r.HitRate == nil {
 				return 0, false
 			}
 			return *r.HitRate, true
 		}, percent},
-		{"Router-believed hit rate", func(r Run) (float64, bool) {
+		{"Router-believed hit rate", func(r Result) (float64, bool) {
 			return r.Summary.BelievedHitRate, r.Summary.BelievedHitRate > 0
 		}, percent},
-		{"TTFT prediction error p50", func(r Run) (float64, bool) {
+		{"TTFT prediction error p50", func(r Result) (float64, bool) {
 			return r.Summary.PredictionError.P50, r.Summary.PredictionError.P50 > 0
 		}, millis},
 	}
@@ -62,7 +62,7 @@ func columns(slo time.Duration) []column {
 // Table renders runs as a Markdown table. With grouped set, runs of the same
 // configuration (differing only in their trial marker) share one row showing
 // the median across trials and, when there are several, the range.
-func Table(runs []Run, slo time.Duration, grouped bool) string {
+func Table(runs []Result, slo time.Duration, grouped bool) string {
 	cols := columns(slo)
 	var b strings.Builder
 	b.WriteString("| Run |")
@@ -96,16 +96,16 @@ func Table(runs []Run, slo time.Duration, grouped bool) string {
 
 // groups partitions runs by configuration, keeping first-seen order. Without
 // grouping every run is its own group.
-func groups(runs []Run, grouped bool) [][]Run {
+func groups(runs []Result, grouped bool) [][]Result {
 	if !grouped {
-		out := make([][]Run, len(runs))
+		out := make([][]Result, len(runs))
 		for i, r := range runs {
-			out[i] = []Run{r}
+			out[i] = []Result{r}
 		}
 		return out
 	}
 	var order []string
-	byGroup := map[string][]Run{}
+	byGroup := map[string][]Result{}
 	for _, r := range runs {
 		g := r.Group()
 		if _, ok := byGroup[g]; !ok {
@@ -113,7 +113,7 @@ func groups(runs []Run, grouped bool) [][]Run {
 		}
 		byGroup[g] = append(byGroup[g], r)
 	}
-	out := make([][]Run, len(order))
+	out := make([][]Result, len(order))
 	for i, g := range order {
 		out[i] = byGroup[g]
 	}
@@ -122,7 +122,7 @@ func groups(runs []Run, grouped bool) [][]Run {
 
 // cell formats one column over a group: the value itself for a single run,
 // or the median with the min-to-max range for several.
-func cell(g []Run, c column) string {
+func cell(g []Result, c column) string {
 	var vals []float64
 	for _, r := range g {
 		if v, ok := c.value(r); ok {

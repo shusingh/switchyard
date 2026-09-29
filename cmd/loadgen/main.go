@@ -241,13 +241,13 @@ func reportCommand(args []string, out io.Writer) error {
 	if fs.NArg() == 0 {
 		return errors.New("report: give at least one results file")
 	}
-	runs := make([]loadgen.Run, 0, fs.NArg())
+	runs := make([]loadgen.Result, 0, fs.NArg())
 	for _, path := range fs.Args() {
 		records, err := loadgen.ReadRecords(path)
 		if err != nil {
 			return err
 		}
-		run := loadgen.Run{
+		run := loadgen.Result{
 			Label:   strings.TrimSuffix(filepath.Base(path), filepath.Ext(path)),
 			Summary: loadgen.Summarize(records, *slo),
 		}

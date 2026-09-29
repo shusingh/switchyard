@@ -68,8 +68,8 @@ func TestDecodeBatchRejectsMalformedPayloads(t *testing.T) {
 	}
 }
 
+// Not parallel: testing.AllocsPerRun must not run alongside other tests.
 func TestDecodeBatchRejectsLengthsBeyondThePayload(t *testing.T) {
-	t.Parallel()
 	// Declared lengths the payload cannot hold are rejected before anything
 	// is allocated for them.
 	for name, payload := range map[string][]byte{
