@@ -8,8 +8,8 @@ import (
 
 // prefixAffinity sends each request to the backend believed to hold the
 // longest prefix of it, breaking ties by fewer in-flight requests and then at
-// random. It ignores load otherwise, so it maximizes cache reuse and exposes
-// the failure mode of pure affinity: a popular prefix piles onto one backend.
+// random. It ignores load otherwise, so it maximizes cache reuse, at the cost
+// of pure affinity's failure mode: a popular prefix piles onto one backend.
 // It is the cache-only baseline for the load-aware estimated_ttft policy.
 type prefixAffinity struct{}
 

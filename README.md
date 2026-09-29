@@ -35,9 +35,9 @@ Switchyard makes that trade explicitly, per request.
 
 ```text
 client ─> admission ─> prefix key ─> index match ─> policy ─> proxy ─> vLLM replica
-          (tenants,    (hash chain   (which replica  (lowest    (streaming,
-           fair queue)  of the        probably has   predicted   retries)
-                        prompt)       which blocks)  TTFT)
+          (tenants,    (hash chain   (which replica  (cache     (streaming,
+           fair queue)  of the        probably has   reuse vs   retries)
+                        prompt)       which blocks)  load)
 ```
 
 1. **Admission.** Each tenant has a token budget; when the pool is saturated,
@@ -50,7 +50,9 @@ client ─> admission ─> prefix key ─> index match ─> policy ─> proxy �
 3. **Index.** The router remembers which blocks it sent to which replica,
    within each replica's real KV capacity, with LRU eviction, a TTL, and
    per-replica generations that discard beliefs when a replica restarts.
-4. **Policy.** `estimated_ttft` predicts, for every replica, the time to first
+4. **Policy.** The default, `prefix_affinity`, sends a request to the
+   replica holding the longest part of its prompt, breaking ties by load.
+   `estimated_ttft` predicts, for every replica, the time to first
    token: fixed overhead, plus the replica's queued prefill work and this
    request's uncached tokens at the replica's prefill throughput, plus a
    decode penalty. It picks the lowest. Throughput is learned per replica
@@ -88,6 +90,10 @@ every request under a 2 s TTFT (p50 59 ms) where `prefix_affinity` managed
 share one GPU, spreading buys no extra compute and `prefix_affinity` wins;
 see [ADR 0012](docs/adr/0012-shared-accelerator-routing.md).
 
+`prefix_affinity` ignores load except to break ties, so traffic dominated by
+one prefix piles onto one replica. Where replicas have their own
+accelerators and traffic is that skewed, use `estimated_ttft`.
+
 ## Quick start (no GPU needed)
 
 Requires Go 1.27 and GNU Make.
@@ -108,7 +114,7 @@ continuous batching, so routing behavior can be studied without hardware.
 Run a workload and see the results:
 
 ```bash
-scripts/bench-sim.sh bench/results/demo 4 "round_robin estimated_ttft" \
+scripts/bench-sim.sh bench/results/demo 4 "round_robin prefix_affinity" \
   -workload agent -duration 2m -rate 0.5
 ```
 
@@ -123,7 +129,9 @@ make vllm-up
 ```
 
 Point any OpenAI client at `http://localhost:8080/v1`. Every option is
-documented in [configs/switchyard.example.yaml](configs/switchyard.example.yaml).
+documented in [configs/switchyard.example.yaml](configs/switchyard.example.yaml);
+[docs/operations.md](docs/operations.md) covers choosing a policy, failure
+handling, and what to alert on.
 
 ## Observability
 
