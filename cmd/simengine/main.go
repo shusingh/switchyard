@@ -4,6 +4,10 @@
 // Usage:
 //
 //	simengine -listen :9001 -capacity-blocks 2340 -prefill-rate 14000
+//
+// With -replicas N it serves N engines on consecutive ports starting at the
+// -listen port. Adding -shared-device puts them on one simulated accelerator
+// that runs one engine step at a time, like replicas time-slicing one GPU.
 package main
 
 import (
@@ -12,9 +16,11 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"sync"
 	"syscall"
 	"time"
@@ -44,13 +50,27 @@ func run() error {
 	batchTokens := flag.Int("max-batch-tokens", d.MaxBatchTokens, "prefill token budget per step")
 	maxRunning := flag.Int("max-running", d.MaxRunning, "maximum concurrently running sequences")
 	maxModelLen := flag.Int("max-model-len", d.MaxModelLen, "maximum prompt plus output tokens")
+	replicas := flag.Int("replicas", 1, "engines to serve on consecutive ports")
+	sharedDevice := flag.Bool("shared-device", false, "run all replicas on one simulated accelerator")
 	flag.Parse()
+
+	if *replicas < 1 {
+		return fmt.Errorf("-replicas must be at least 1, got %d", *replicas)
+	}
+	host, portText, err := net.SplitHostPort(*listen)
+	if err != nil {
+		return fmt.Errorf("-listen: %w", err)
+	}
+	basePort, err := strconv.Atoi(portText)
+	if err != nil {
+		return fmt.Errorf("-listen port: %w", err)
+	}
 
 	logger, err := telemetry.NewLogger(os.Stdout, "info")
 	if err != nil {
 		return err
 	}
-	engine := sim.NewEngine(sim.Options{
+	opts := sim.Options{
 		Model: *model,
 		Cost: sim.CostModel{
 			BlockTokens:            *blockTokens,
@@ -64,43 +84,63 @@ func run() error {
 			MaxModelLen:            *maxModelLen,
 		},
 		DefaultOutputTokens: *outputTokens,
-	})
+	}
+	if *sharedDevice {
+		opts.Device = sim.NewDevice()
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	var wg sync.WaitGroup
-	engineCtx, stopEngine := context.WithCancel(context.Background())
+	engineCtx, stopEngines := context.WithCancel(context.Background())
 	defer func() {
-		stopEngine()
+		stopEngines()
 		wg.Wait()
 	}()
-	wg.Go(func() { engine.Run(engineCtx) })
 
-	httpServer := &http.Server{
-		Addr:              *listen,
-		Handler:           engine.Handler(),
-		ReadHeaderTimeout: 10 * time.Second,
-		ErrorLog:          slog.NewLogLogger(logger.Handler(), slog.LevelWarn),
+	servers := make([]*http.Server, *replicas)
+	serveErr := make(chan error, *replicas)
+	for i := range servers {
+		engine := sim.NewEngine(opts)
+		wg.Go(func() { engine.Run(engineCtx) })
+		addr := net.JoinHostPort(host, strconv.Itoa(basePort+i))
+		servers[i] = &http.Server{
+			Addr:              addr,
+			Handler:           engine.Handler(),
+			ReadHeaderTimeout: 10 * time.Second,
+			ErrorLog:          slog.NewLogLogger(logger.Handler(), slog.LevelWarn),
+		}
+		go func() { serveErr <- servers[i].ListenAndServe() }()
+		logger.Info("simengine started",
+			slog.String("listen", addr),
+			slog.String("model", *model),
+			slog.Int("capacity_blocks", *capacity),
+			slog.Bool("shared_device", *sharedDevice))
 	}
-	serveErr := make(chan error, 1)
-	go func() { serveErr <- httpServer.ListenAndServe() }()
-	logger.Info("simengine started",
-		slog.String("listen", *listen),
-		slog.String("model", *model),
-		slog.Int("capacity_blocks", *capacity))
 
 	select {
 	case err := <-serveErr:
+		shutdown(servers)
 		return fmt.Errorf("serve: %w", err)
 	case <-ctx.Done():
 	}
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	if err := httpServer.Shutdown(shutdownCtx); err != nil {
-		_ = httpServer.Close()
-	}
-	if err := <-serveErr; !errors.Is(err, http.ErrServerClosed) {
-		return fmt.Errorf("serve: %w", err)
+	shutdown(servers)
+	for range servers {
+		if err := <-serveErr; !errors.Is(err, http.ErrServerClosed) {
+			return fmt.Errorf("serve: %w", err)
+		}
 	}
 	return nil
+}
+
+// shutdown stops every server, waiting up to ten seconds for in-flight
+// requests.
+func shutdown(servers []*http.Server) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	for _, srv := range servers {
+		if err := srv.Shutdown(ctx); err != nil {
+			_ = srv.Close()
+		}
+	}
 }

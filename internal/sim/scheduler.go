@@ -100,8 +100,9 @@ func (s *sequence) privateBlocks(blockTokens int) int {
 // scheduler runs the engine loop: admit waiting sequences into free cache
 // space, execute one batched step, emit tokens, repeat.
 type scheduler struct {
-	model CostModel
-	cache *blockCache
+	model  CostModel
+	cache  *blockCache
+	device *Device
 
 	mu       sync.Mutex
 	incoming []*sequence // guarded by mu
@@ -122,11 +123,12 @@ type scheduler struct {
 	hitTokens    atomic.Int64
 }
 
-func newScheduler(model CostModel) *scheduler {
+func newScheduler(model CostModel, device *Device) *scheduler {
 	return &scheduler{
-		model: model,
-		cache: newBlockCache(model.CapacityBlocks),
-		wake:  make(chan struct{}, 1),
+		model:  model,
+		cache:  newBlockCache(model.CapacityBlocks),
+		device: device,
+		wake:   make(chan struct{}, 1),
 	}
 }
 
@@ -181,7 +183,7 @@ func (s *scheduler) run(ctx context.Context) {
 			}
 		}
 		chunks, duration := s.plan()
-		if !sleep(ctx, duration) {
+		if !s.device.execute(ctx, duration) {
 			return
 		}
 		s.execute(chunks)

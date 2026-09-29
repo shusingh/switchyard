@@ -149,14 +149,32 @@ The cache hit rate is vLLM's own counter. No request failed.
   away from the replica holding them (mean matched fraction 0.61 against
   prefix_affinity's 0.83) and its TTFT predictions are wider (p10 to p90
   signed error -0.7 s to +1.4 s against -0.5 s to +0.2 s).
-- Working hypothesis, not yet tested: the four replicas share one GPU. The
-  estimator treats replicas as independent compute, so moving a request to a
-  replica with a shorter queue looks faster; on a shared device that
-  replica's prefill competes for the same compute, so the move only adds a
-  cache miss. The simulator models independent replicas, which would explain
-  why it did not show this. Replicas on separate GPUs would not have this
-  coupling.
+- Cause: the four replicas share one GPU, and the estimator treats replicas
+  as independent compute, so moving a request to a replica with a shorter
+  queue looks faster when that replica actually competes for the same
+  device. A simulator mode with shared compute (ADR 0012) reproduces the GPU
+  ordering and hit rates; see the table below. Three device-aware changes to
+  the estimator were tried and rejected (ADR 0012), so on shared
+  accelerators prefix_affinity is the recommended policy.
 - Precise mode did not help here, and its trials varied more. Its keys were
   verified identical to vLLM's, so the gap is in the routing decisions it
   feeds, not in index accuracy; it inherits the estimated_ttft behavior
   above.
+
+### Simulated, agent workload, four replicas on one shared device
+
+`SHARED_DEVICE=1 scripts/bench-sim.sh bench/results/sim-agent-4-shared 4 "round_robin least_loaded prefix_affinity estimated_ttft" -workload agent -duration 5m -rate 0.5`
+
+Simulated engines that execute one step at a time on a shared simulated
+accelerator (ADR 0012). One run per policy; GPU hit rates in parentheses.
+
+| Policy | Cache hit rate | TTFT p50 | TTFT p99 | Goodput (TTFT <= 2 s) |
+|---|---:|---:|---:|---:|
+| round_robin | 31.3% (32.7%) | 18.37 s | 47.53 s | 17.9% |
+| least_loaded | 30.4% (31.3%) | 19.30 s | 42.17 s | 17.6% |
+| prefix_affinity | 77.8% (81.7%) | 264 ms | 6.45 s | 87.5% |
+| estimated_ttft | 54.1% (62.7%) | 6.39 s | 23.61 s | 42.7% |
+
+The ordering and hit rates match the GPU. Latencies are higher because the
+model fully serializes the replicas' steps, while the GPU overlaps some of
+their work.

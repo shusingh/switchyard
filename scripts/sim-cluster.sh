@@ -9,7 +9,8 @@
 # Environment: ROUTER_PORT (8080), BASE_PORT (9001), SIM_FLAGS (extra
 # simengine flags), ROUTING_EXTRA (extra YAML lines under routing, such as
 # "  block_bytes: 64"), SIM_RUN_DIR (.run/sim; use a separate one per
-# concurrent cluster), BIN_DIR (./bin). Run `make build` first.
+# concurrent cluster), SHARED_DEVICE (1 runs every replica on one simulated
+# accelerator), BIN_DIR (./bin). Run `make build` first.
 set -euo pipefail
 
 cd "$(git rev-parse --show-toplevel)"
@@ -58,11 +59,19 @@ start() {
     echo "backends:"
   } >"$config"
 
+  if [[ "${SHARED_DEVICE:-0}" == 1 ]]; then
+    # shellcheck disable=SC2086 # SIM_FLAGS is intentionally word-split
+    "$BIN_DIR/simengine$EXE" -listen ":$BASE_PORT" -replicas "$replicas" -shared-device ${SIM_FLAGS:-} \
+      >"$RUN_DIR/sim-shared.log" 2>&1 &
+    echo $! >"$RUN_DIR/sim-shared.pid"
+  fi
   for ((i = 0; i < replicas; i++)); do
     local port=$((BASE_PORT + i))
-    # shellcheck disable=SC2086 # SIM_FLAGS is intentionally word-split
-    "$BIN_DIR/simengine$EXE" -listen ":$port" ${SIM_FLAGS:-} >"$RUN_DIR/sim-$port.log" 2>&1 &
-    echo $! >"$RUN_DIR/sim-$port.pid"
+    if [[ "${SHARED_DEVICE:-0}" != 1 ]]; then
+      # shellcheck disable=SC2086 # SIM_FLAGS is intentionally word-split
+      "$BIN_DIR/simengine$EXE" -listen ":$port" ${SIM_FLAGS:-} >"$RUN_DIR/sim-$port.log" 2>&1 &
+      echo $! >"$RUN_DIR/sim-$port.pid"
+    fi
     printf '  - id: sim-%d\n    url: http://localhost:%d\n' "$i" "$port" >>"$config"
   done
   for ((i = 0; i < replicas; i++)); do

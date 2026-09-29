@@ -36,6 +36,9 @@ type Options struct {
 	// Faults injects failures for resilience tests. The zero value injects
 	// none.
 	Faults Faults
+	// Device, if set, is compute shared with other engines. Nil gives the
+	// engine dedicated compute.
+	Device *Device
 }
 
 // Stats counts requests and cache use.
@@ -72,7 +75,7 @@ func NewEngine(opts Options) *Engine {
 	}
 	return &Engine{
 		opts:      opts,
-		sched:     newScheduler(opts.Cost),
+		sched:     newScheduler(opts.Cost, opts.Device),
 		faults:    newFaultState(opts.Faults),
 		tokenizer: newTokenizer(opts.Cost.BlockTokens, opts.Cost.BytesPerToken),
 	}

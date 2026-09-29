@@ -714,6 +714,10 @@ to exercise routing policies:
   benchmark's synthetic text, which Qwen2.5's tokenizer encodes at exactly one
   token per word (verified word by word through vLLM's `/tokenize`), so
   simulated working sets match the GPU setup's.
+- **Optional shared accelerator.** `-replicas N -shared-device` serves N
+  engines from one process on one simulated device that executes one engine
+  step at a time, as replicas time-slicing one GPU do. Without it, every
+  engine has its own compute (ADR 0012).
 - Exposes vLLM-shaped `/metrics` (`num_requests_running`,
   `num_requests_waiting`, `kv_cache_usage_perc`, `prefix_cache_queries_total`,
   `prefix_cache_hits_total`, `cache_config_info`) and `/health`.
@@ -801,6 +805,7 @@ write a new ADR that supersedes the old one; do not edit accepted ADRs.
 | [0009](../adr/0009-benchmark-replica-configuration.md) | Benchmark on four small replicas with fixed 1 GiB KV caches | Accepted |
 | [0010](../adr/0010-precise-mode-dependencies.md) | ZeroMQ and msgpack libraries for precise mode | Accepted |
 | [0011](../adr/0011-prefix-block-size.md) | Keep 128-byte prefix blocks in approximate mode | Accepted |
+| [0012](../adr/0012-shared-accelerator-routing.md) | Simulate shared accelerators; keep estimated_ttft unchanged | Accepted |
 
 ## 16. Open questions and risks
 
@@ -809,6 +814,7 @@ write a new ADR that supersedes the old one; do not edit accepted ADRs.
 | Can four vLLM replicas share one 4090 with small, fixed KV caches reliably? | Risk | Phase 0 spike; fallback to 2 or 3 replicas, or a smaller model |
 | Byte-to-token ratio varies by content (code, CJK) | Risk | Per-backend EWMA correction from `usage.prompt_tokens`; measure prediction error |
 | Approximate index drift under memory pressure | Risk | Quantify in Phase 7 via prediction error and vLLM hit counters; `staleTrust` term if needed |
+| Cost model for replicas sharing an accelerator: estimated_ttft loses to prefix_affinity there, and three device-aware variants did not help (ADR 0012) | Question | Open; a model must cover per-replica KV capacity as well as shared compute |
 | Same-GPU contention distorts absolute latencies | Risk | State plainly; compare policies only under identical conditions; optional multi-GPU validation |
 | vLLM hash compatibility for precise mode | Risk | Phase 8 starts with a spike; drop if it fails |
 | Chat template ordering (tools rendered inside system prompt) may differ by model | Question | Canonical order puts tools before messages; verify on the chosen model in Phase 3 |

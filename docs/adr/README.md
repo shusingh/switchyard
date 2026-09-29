@@ -17,3 +17,4 @@ Accepted ADRs are not edited; a new ADR supersedes an old one. See
 | [0009](0009-benchmark-replica-configuration.md) | Benchmark on four small replicas with fixed 1 GiB KV caches | Accepted |
 | [0010](0010-precise-mode-dependencies.md) | ZeroMQ and msgpack libraries for precise mode | Accepted |
 | [0011](0011-prefix-block-size.md) | Keep 128-byte prefix blocks in approximate mode | Accepted |
+| [0012](0012-shared-accelerator-routing.md) | Simulate shared accelerators; keep estimated_ttft unchanged | Accepted |
