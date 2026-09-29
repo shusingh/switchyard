@@ -96,6 +96,25 @@ func TestTokenBudget(t *testing.T) {
 	}
 }
 
+func TestTokenBudgetRefillsOverTime(t *testing.T) {
+	t.Parallel()
+	clk := &clock{t: time.Unix(0, 0)}
+	c := newController(t, Config{
+		MaxInFlight: 100,
+		Default:     TenantConfig{Name: "default", Weight: 1, MaxQueued: 10, TokensPerSecond: 100, Burst: 1000},
+	}, clk.now)
+	if _, err := c.Admit(context.Background(), "default", 1000); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Admit(context.Background(), "default", 300); !errors.Is(err, ErrRateLimited) {
+		t.Fatalf("empty bucket: error = %v, want ErrRateLimited", err)
+	}
+	clk.advance(3 * time.Second) // 300 tokens accrue
+	if _, err := c.Admit(context.Background(), "default", 300); err != nil {
+		t.Errorf("after refilling: error = %v, want admitted", err)
+	}
+}
+
 func TestQueueGrantsInOrderWhenCapacityFrees(t *testing.T) {
 	t.Parallel()
 	c := newController(t, Config{MaxInFlight: 1}, nil)
