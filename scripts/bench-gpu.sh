@@ -5,7 +5,10 @@
 # learned state carries over between trials.
 #
 # Usage:
-#   scripts/bench-gpu.sh OUT_DIR "POLICY..." TRIALS [loadgen run flags...]
+#   scripts/bench-gpu.sh OUT_DIR "POLICY[:precise]..." TRIALS [loadgen run flags...]
+#
+# A ":precise" suffix runs that policy in precise prefix mode, driven by the
+# replicas' KV cache events (replica N publishes on port KV_EVENTS_BASE_PORT+N).
 #
 # Example:
 #   scripts/bench-gpu.sh bench/results/gpu-agent "round_robin estimated_ttft" 3 \
@@ -28,6 +31,7 @@ EXE=""
 MODEL=${MODEL:-Qwen/Qwen2.5-1.5B-Instruct}
 PORT=${PORT:-8090}
 BACKENDS=${BACKENDS:-http://localhost:8001,http://localhost:8002,http://localhost:8003,http://localhost:8004}
+KV_EVENTS_BASE_PORT=${KV_EVENTS_BASE_PORT:-5601}
 run_dir=.run/gpu-bench
 mkdir -p "$out_dir" "$run_dir"
 
@@ -44,13 +48,14 @@ trap stop_router EXIT
 # Routing parameters match the reference setup (ADR 0009): 37,440 tokens of
 # KV cache per replica; the synthetic text is 5.55 bytes per token.
 write_config() {
-  local policy=$1 config=$2
+  local policy=$1 mode=$2 config=$3
   {
     echo "server:"
     echo "  listen: \":$PORT\""
     echo "  explain_headers: true"
     echo "routing:"
     echo "  policy: $policy"
+    echo "  prefix_mode: $mode"
     echo "  bytes_per_token: 5.55"
     echo "  kv_capacity_tokens: 37440"
     echo "log:"
@@ -59,16 +64,24 @@ write_config() {
     local i=0
     for url in ${BACKENDS//,/ }; do
       printf '  - id: vllm-%d\n    url: %s\n' "$i" "$url"
+      if [[ "$mode" == precise ]]; then
+        printf '    kv_events_endpoint: tcp://localhost:%d\n' $((KV_EVENTS_BASE_PORT + i))
+      fi
       i=$((i + 1))
     done
   } >"$config"
 }
 
 for ((trial = 1; trial <= trials; trial++)); do
-  for policy in $policies; do
-    config="$run_dir/$policy.yaml"
-    write_config "$policy" "$config"
-    "bin/switchyard$EXE" -config "$config" >"$run_dir/$policy-$trial.router.log" 2>&1 &
+  for spec in $policies; do
+    policy=${spec%%:*}
+    mode=approximate
+    [[ "$spec" == *:precise ]] && mode=precise
+    name=$policy
+    [[ "$mode" == precise ]] && name="$policy-precise"
+    config="$run_dir/$name.yaml"
+    write_config "$policy" "$mode" "$config"
+    "bin/switchyard$EXE" -config "$config" >"$run_dir/$name-$trial.router.log" 2>&1 &
     router_pid=$!
     until curl -fsS "http://localhost:$PORT/readyz" >/dev/null 2>&1; do sleep 0.3; done
 
@@ -77,8 +90,8 @@ for ((trial = 1; trial <= trials; trial++)); do
       -model "$MODEL" \
       -backends "$BACKENDS" \
       -reset-caches \
-      -label "$policy (trial $trial)" \
-      -out "$out_dir/$policy-trial$trial.jsonl" \
+      -label "$name (trial $trial)" \
+      -out "$out_dir/$name-trial$trial.jsonl" \
       "$@"
     stop_router
   done
