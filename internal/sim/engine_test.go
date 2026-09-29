@@ -107,8 +107,9 @@ func TestCachedPrefixLowersTimeToFirstToken(t *testing.T) {
 	t.Parallel()
 	cost := simtest.FastCost()
 	cost.PrefillTokensPerSecond = 20000 // 4,000 tokens take about 200ms
+	cost.BytesPerToken = 4
 	srv := simtest.Start(t, sim.Options{Model: model, Cost: cost})
-	system := strings.Repeat("abcd ", 3200)
+	system := strings.Repeat("abcd ", 3200) // 16,000 bytes: 4,000 tokens
 
 	ttft := func(user string) time.Duration {
 		start := time.Now()
