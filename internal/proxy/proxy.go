@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/shusingh/switchyard/internal/backend"
@@ -66,6 +67,13 @@ var hopByHopHeaders = map[string]bool{
 	"Proxy-Authorization": true, "Proxy-Connection": true, "Te": true,
 	"Trailer": true, "Transfer-Encoding": true, "Upgrade": true,
 }
+
+// copyBuffers holds buffers for relaying non-streaming bodies. Allocating a
+// fresh 32 KB buffer per response dominated the proxy's allocations.
+var copyBuffers = sync.Pool{New: func() any {
+	b := make([]byte, 32<<10)
+	return &b
+}}
 
 // Proxy forwards requests to backends. It is safe for concurrent use.
 type Proxy struct {
@@ -179,7 +187,9 @@ func (p *Proxy) Forward(w http.ResponseWriter, r *http.Request, b *backend.Backe
 
 	defer func() { res.Duration = time.Since(start) }()
 	if !res.Streamed {
-		n, err := io.Copy(w, resp.Body)
+		buf := copyBuffers.Get().(*[]byte) //nolint:errcheck,forcetypeassert // the pool only holds *[]byte
+		n, err := io.CopyBuffer(w, resp.Body, *buf)
+		copyBuffers.Put(buf)
 		res.BytesWritten = n
 		if err != nil {
 			return res, fmt.Errorf("relay response body: %w", err)

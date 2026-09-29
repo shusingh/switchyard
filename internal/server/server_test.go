@@ -117,7 +117,7 @@ func newHarness(t *testing.T, opts harnessOptions) *harness {
 }
 
 // admissionOrDefault returns c, or a permissive controller if c is nil.
-func admissionOrDefault(t *testing.T, c *admission.Controller) *admission.Controller {
+func admissionOrDefault(t testing.TB, c *admission.Controller) *admission.Controller {
 	t.Helper()
 	if c != nil {
 		return c

@@ -7,8 +7,8 @@
 package server
 
 import (
+	"bytes"
 	"errors"
-	"io"
 	"log/slog"
 	"math"
 	"net/http"
@@ -191,9 +191,15 @@ func explain(h http.Header, b *backend.Backend, route *scheduler.Request) {
 // readBody reads the request body within the size limit, or writes an error
 // response and returns false.
 func (s *Server) readBody(w http.ResponseWriter, r *http.Request) ([]byte, bool) {
-	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, s.maxRequestBytes))
+	var buf bytes.Buffer
+	if r.ContentLength > 0 && r.ContentLength <= s.maxRequestBytes {
+		// Size the buffer once instead of growing it while reading. The
+		// extra byte lets ReadFrom see EOF without growing again.
+		buf.Grow(int(r.ContentLength) + 1)
+	}
+	_, err := buf.ReadFrom(http.MaxBytesReader(w, r.Body, s.maxRequestBytes))
 	if err == nil {
-		return body, true
+		return buf.Bytes(), true
 	}
 	if maxErr, ok := errors.AsType[*http.MaxBytesError](err); ok {
 		openai.WriteError(w, http.StatusRequestEntityTooLarge, openai.ErrTypeInvalidRequest,
