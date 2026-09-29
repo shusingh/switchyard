@@ -5,10 +5,11 @@ import (
 	"strings"
 )
 
-// vocabulary holds common English words that most LLM tokenizers encode as a
-// single token when preceded by a space, so a segment of N words is close to
-// N tokens. The exact count is measured against the real tokenizer during the
-// GPU benchmarks (the server's usage report gives the true prompt size).
+// vocabulary holds common English words that LLM tokenizers encode as a
+// single token when preceded by a space, so a segment of N words is N tokens.
+// Verified against Qwen2.5's tokenizer through vLLM's /tokenize endpoint on
+// 2026-09-28: every word is one token, and random text averages 5.5 bytes per
+// token.
 var vocabulary = strings.Fields(`
 the of and to in is that for it as was with be by on not he this are or his
 from at which but have an they you were her she there been one all we their

@@ -15,6 +15,7 @@ import (
 
 	"github.com/shusingh/switchyard/internal/backend"
 	"github.com/shusingh/switchyard/internal/openai"
+	"github.com/shusingh/switchyard/internal/prefix"
 	"github.com/shusingh/switchyard/internal/proxy"
 	"github.com/shusingh/switchyard/internal/scheduler"
 )
@@ -26,9 +27,14 @@ const statusClientClosedRequest = 499
 
 // Options holds the server's dependencies.
 type Options struct {
-	Pool            *backend.Pool
-	Policy          scheduler.Policy
-	Proxy           *proxy.Proxy
+	Pool   *backend.Pool
+	Policy scheduler.Policy
+	Proxy  *proxy.Proxy
+	// Keyer and Index track which backends hold which prompt prefixes. They
+	// are maintained under every policy, including cache-blind ones, so the
+	// per-request overhead is identical when policies are compared.
+	Keyer           *prefix.Keyer
+	Index           *prefix.Index
 	Logger          *slog.Logger
 	MaxRequestBytes int64
 }
@@ -38,6 +44,8 @@ type Server struct {
 	pool            *backend.Pool
 	policy          scheduler.Policy
 	proxy           *proxy.Proxy
+	keyer           *prefix.Keyer
+	index           *prefix.Index
 	logger          *slog.Logger
 	maxRequestBytes int64
 }
@@ -48,6 +56,8 @@ func New(opts Options) *Server {
 		pool:            opts.Pool,
 		policy:          opts.Policy,
 		proxy:           opts.Proxy,
+		keyer:           opts.Keyer,
+		index:           opts.Index,
 		logger:          opts.Logger,
 		maxRequestBytes: opts.MaxRequestBytes,
 	}
@@ -83,17 +93,24 @@ func (s *Server) handleInference(w http.ResponseWriter, r *http.Request) {
 		openai.WriteError(w, http.StatusBadRequest, openai.ErrTypeInvalidRequest, "could not read request body")
 		return
 	}
-	fields, err := openai.DecodeRoutingFields(body)
+	parsed, err := s.keyer.Parse(body, r.URL.Path == openai.PathChatCompletions)
 	if err != nil {
 		openai.WriteError(w, http.StatusBadRequest, openai.ErrTypeInvalidRequest, err.Error())
 		return
 	}
+	fields := parsed.Fields
 
-	b, ok := s.pick(w, &scheduler.Request{Model: fields.Model})
+	backends := len(s.pool.Backends())
+	route := &scheduler.Request{Model: fields.Model, Blocks: len(parsed.Hashes), Matched: make([]int, backends)}
+	s.index.Match(parsed.Hashes, s.pool.Generations(make([]uint64, 0, backends)), route.Matched)
+	b, ok := s.pick(w, route)
 	if !ok {
 		reqLog.Warn("no healthy backend", slog.String("model", fields.Model))
 		return
 	}
+	// Record the belief before forwarding, so concurrent requests with the
+	// same prefix see it immediately.
+	s.index.Insert(b.Index(), b.Generation(), parsed.Hashes)
 
 	b.BeginRequest()
 	res, err := s.proxy.Forward(w, r, b, body)
@@ -114,6 +131,8 @@ func (s *Server) handleInference(w http.ResponseWriter, r *http.Request) {
 		slog.Bool("stream", fields.Stream),
 		slog.String("policy", s.policy.Name()),
 		slog.String("backend", b.ID()),
+		slog.Int("prefix_blocks", route.Blocks),
+		slog.Int("matched_blocks", route.MatchedOn(b)),
 		slog.Int("status", status),
 		slog.Int("request_bytes", len(body)),
 		slog.Int64("response_bytes", res.BytesWritten),

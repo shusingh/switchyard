@@ -20,6 +20,7 @@ import (
 
 	"github.com/shusingh/switchyard/internal/backend"
 	"github.com/shusingh/switchyard/internal/config"
+	"github.com/shusingh/switchyard/internal/prefix"
 	"github.com/shusingh/switchyard/internal/proxy"
 	"github.com/shusingh/switchyard/internal/scheduler"
 	"github.com/shusingh/switchyard/internal/server"
@@ -73,10 +74,16 @@ func run() error {
 	checker.CheckAll(ctx) // serve immediately if backends are already up
 	wg.Go(func() { checker.Run(healthCtx) })
 
+	capacities := make([]int, len(cfg.Backends))
+	for i := range capacities {
+		capacities[i] = cfg.IndexCapacityBlocks(i)
+	}
 	srv := server.New(server.Options{
 		Pool:            pool,
 		Policy:          policy,
 		Proxy:           proxy.New(cfg.Proxy),
+		Keyer:           prefix.NewKeyer(cfg.Routing.BlockBytes, cfg.Routing.MaxBlocks),
+		Index:           prefix.NewIndex(capacities, cfg.Routing.IndexTTL, nil),
 		Logger:          logger,
 		MaxRequestBytes: cfg.Server.MaxRequestBytes,
 	})

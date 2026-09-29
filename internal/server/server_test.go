@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -16,6 +17,7 @@ import (
 	"github.com/shusingh/switchyard/internal/backend"
 	"github.com/shusingh/switchyard/internal/config"
 	"github.com/shusingh/switchyard/internal/openai"
+	"github.com/shusingh/switchyard/internal/prefix"
 	"github.com/shusingh/switchyard/internal/proxy"
 	"github.com/shusingh/switchyard/internal/scheduler"
 	"github.com/shusingh/switchyard/internal/sim"
@@ -82,7 +84,7 @@ func newHarness(t *testing.T, opts harnessOptions) *harness {
 	t.Cleanup(px.CloseIdleConnections)
 
 	router := httptest.NewServer(New(Options{
-		Pool: pool, Policy: policy, Proxy: px,
+		Pool: pool, Policy: policy, Proxy: px, Keyer: testKeyer(), Index: testIndex(len(backends)),
 		Logger: slog.New(slog.DiscardHandler), MaxRequestBytes: opts.maxRequestBytes,
 	}).Handler())
 	t.Cleanup(router.Close)
@@ -92,6 +94,16 @@ func newHarness(t *testing.T, opts harnessOptions) *harness {
 	h.url = router.URL
 	h.client = &http.Client{Transport: transport, Timeout: 30 * time.Second}
 	return h
+}
+
+func testKeyer() *prefix.Keyer { return prefix.NewKeyer(64, 4096) }
+
+func testIndex(backends int) *prefix.Index {
+	capacities := make([]int, backends)
+	for i := range capacities {
+		capacities[i] = 1 << 16
+	}
+	return prefix.NewIndex(capacities, time.Hour, nil)
 }
 
 func (h *harness) post(t *testing.T, ctx context.Context, path, body string) *http.Response {
@@ -141,6 +153,38 @@ func TestRoundRobinSpreadsRequests(t *testing.T) {
 		if got := e.Stats().Completed; got != 2 {
 			t.Errorf("engine %d completed %d requests, want 2", i, got)
 		}
+	}
+}
+
+func TestPrefixAffinityKeepsSharedPrefixOnOneBackend(t *testing.T) {
+	t.Parallel()
+	policy, _ := scheduler.New(scheduler.PolicyPrefixAffinity)
+	h := newHarness(t, harnessOptions{engines: fastEngines(4), policy: policy})
+	system := strings.Repeat("Follow the operator's compliance policy exactly. ", 60)
+	for i := range 8 {
+		body := `{"model":"sim-model","max_tokens":2,"messages":[` +
+			`{"role":"system","content":"` + system + `"},` +
+			`{"role":"user","content":"question ` + strconv.Itoa(i) + `"}]}`
+		resp := h.post(t, context.Background(), openai.PathChatCompletions, body)
+		_, _ = io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("request %d: status %d", i, resp.StatusCode)
+		}
+	}
+	served, cached := 0, int64(0)
+	for _, e := range h.engines {
+		st := e.Stats()
+		if st.Completed > 0 {
+			served++
+		}
+		cached += st.CachedPromptTokens
+	}
+	if served != 1 {
+		t.Errorf("requests sharing a prefix went to %d backends, want 1", served)
+	}
+	if cached == 0 {
+		t.Error("the engine saw no prefix cache hits")
 	}
 }
 
@@ -272,7 +316,10 @@ func TestUnreachableBackendReturnsBadGateway(t *testing.T) {
 	policy, _ := scheduler.New(scheduler.PolicyRoundRobin)
 	px := proxy.New(config.Proxy{DialTimeout: time.Second, ResponseHeaderTimeout: time.Second, StreamIdleTimeout: time.Second, MaxIdleConnsPerHost: 1})
 	t.Cleanup(px.CloseIdleConnections)
-	router := httptest.NewServer(New(Options{Pool: pool, Policy: policy, Proxy: px, Logger: slog.New(slog.DiscardHandler), MaxRequestBytes: 1 << 20}).Handler())
+	router := httptest.NewServer(New(Options{
+		Pool: pool, Policy: policy, Proxy: px, Keyer: testKeyer(), Index: testIndex(1),
+		Logger: slog.New(slog.DiscardHandler), MaxRequestBytes: 1 << 20,
+	}).Handler())
 	t.Cleanup(router.Close)
 
 	req, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, router.URL+openai.PathChatCompletions, strings.NewReader(`{"model":"sim-model"}`))

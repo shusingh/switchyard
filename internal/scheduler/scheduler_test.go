@@ -113,6 +113,32 @@ func TestP2CNeverPicksTheBusierOfTwo(t *testing.T) {
 	}
 }
 
+func TestPrefixAffinity(t *testing.T) {
+	t.Parallel()
+	candidates := newCandidates(t, 3)
+	p, _ := New(PolicyPrefixAffinity)
+
+	// The longest match wins even when that backend is the busiest.
+	for range 10 {
+		candidates[1].BeginRequest()
+	}
+	req := &Request{Blocks: 10, Matched: []int{2, 9, 0}}
+	if b, _ := p.Pick(req, candidates); b != candidates[1] {
+		t.Errorf("picked %s, want b1 with the longest match", b.ID())
+	}
+
+	// Equal matches fall back to the less loaded backend.
+	req = &Request{Blocks: 10, Matched: []int{4, 4, 1}}
+	if b, _ := p.Pick(req, candidates); b != candidates[0] {
+		t.Errorf("picked %s, want b0: same match as b1 but idle", b.ID())
+	}
+
+	// With no prefix information it degrades to least loaded.
+	if b, _ := p.Pick(&Request{}, candidates); b == candidates[1] {
+		t.Error("picked the busiest backend without any prefix match")
+	}
+}
+
 func TestRandomOnlyPicksCandidates(t *testing.T) {
 	t.Parallel()
 	candidates := newCandidates(t, 3)

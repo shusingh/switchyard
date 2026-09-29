@@ -135,6 +135,32 @@ func TestParseRejectsInvalidConfig(t *testing.T) {
 	}
 }
 
+func TestIndexCapacityBlocks(t *testing.T) {
+	t.Parallel()
+	cfg, err := Parse([]byte(`
+routing:
+  block_bytes: 100
+  bytes_per_token: 5
+  kv_capacity_tokens: 1000
+backends:
+  - id: a
+    url: http://localhost:8001
+  - id: b
+    url: http://localhost:8002
+    kv_capacity_tokens: 2000
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 1,000 tokens at 5 bytes each is 5,000 bytes, or 50 blocks of 100 bytes.
+	if got := cfg.IndexCapacityBlocks(0); got != 50 {
+		t.Errorf("IndexCapacityBlocks(0) = %d, want 50", got)
+	}
+	if got := cfg.IndexCapacityBlocks(1); got != 100 {
+		t.Errorf("IndexCapacityBlocks(1) = %d, want 100 from the per-backend override", got)
+	}
+}
+
 func TestValidateReportsAllErrors(t *testing.T) {
 	t.Parallel()
 	_, err := Parse([]byte("backends:\n  - id: \"\"\n    url: ftp://x\nlog:\n  level: loud\n"))

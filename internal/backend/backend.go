@@ -13,8 +13,9 @@ import (
 // Backend is one model server. Its exported methods are safe for concurrent
 // use.
 type Backend struct {
-	id   string
-	base *url.URL
+	id    string
+	index int
+	base  *url.URL
 
 	healthy    atomic.Bool
 	generation atomic.Uint64
@@ -30,6 +31,10 @@ type Backend struct {
 
 // ID returns the backend's configured identifier.
 func (b *Backend) ID() string { return b.id }
+
+// Index returns the backend's position in the pool, from 0. Per-backend state
+// elsewhere, such as the prefix index, is kept in slices indexed by it.
+func (b *Backend) Index() int { return b.index }
 
 // Healthy reports whether the backend is currently eligible for traffic.
 func (b *Backend) Healthy() bool { return b.healthy.Load() }
@@ -77,12 +82,12 @@ type Pool struct {
 // their first successful health check.
 func NewPool(cfgs []config.Backend) (*Pool, error) {
 	p := &Pool{backends: make([]*Backend, 0, len(cfgs))}
-	for _, c := range cfgs {
+	for i, c := range cfgs {
 		u, err := url.Parse(c.URL)
 		if err != nil {
 			return nil, fmt.Errorf("backend %s: parse url: %w", c.ID, err)
 		}
-		p.backends = append(p.backends, &Backend{id: c.ID, base: u})
+		p.backends = append(p.backends, &Backend{id: c.ID, index: i, base: u})
 	}
 	return p, nil
 }
@@ -99,6 +104,15 @@ func (p *Pool) AppendHealthy(dst []*Backend) []*Backend {
 		if b.Healthy() {
 			dst = append(dst, b)
 		}
+	}
+	return dst
+}
+
+// Generations appends every backend's current generation to dst, in pool
+// order, and returns the extended slice.
+func (p *Pool) Generations(dst []uint64) []uint64 {
+	for _, b := range p.backends {
+		dst = append(dst, b.Generation())
 	}
 	return dst
 }

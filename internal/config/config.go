@@ -51,6 +51,8 @@ type Backend struct {
 	// URL is the base URL, without the /v1 path, for example
 	// "http://localhost:8001".
 	URL string `yaml:"url"`
+	// KVCapacityTokens overrides routing.kv_capacity_tokens for this backend.
+	KVCapacityTokens int `yaml:"kv_capacity_tokens"`
 }
 
 // Health configures active health checking of backends.
@@ -81,11 +83,37 @@ type Proxy struct {
 	MaxIdleConnsPerHost int           `yaml:"max_idle_conns_per_host"`
 }
 
-// Routing selects the routing policy.
+// Routing selects the routing policy and configures prefix tracking. See
+// docs/engineering/design.md sections 6, 7, and 9.
 type Routing struct {
 	// Policy names the policy, for example "round_robin". Valid names are
 	// defined by the scheduler package and checked when it is constructed.
 	Policy string `yaml:"policy"`
+	// BlockBytes is the size of one hashed prefix block of the canonical
+	// request.
+	BlockBytes int `yaml:"block_bytes"`
+	// MaxBlocks caps how many blocks of one request are keyed, bounding the
+	// work per request.
+	MaxBlocks int `yaml:"max_blocks"`
+	// IndexTTL is how long the router trusts that a backend still caches a
+	// prefix it was sent.
+	IndexTTL time.Duration `yaml:"index_ttl"`
+	// BytesPerToken converts request bytes to estimated tokens.
+	BytesPerToken float64 `yaml:"bytes_per_token"`
+	// KVCapacityTokens is a backend's KV cache capacity in tokens, which
+	// bounds how many prefix blocks the router believes it holds. Backends
+	// may override it.
+	KVCapacityTokens int `yaml:"kv_capacity_tokens"`
+}
+
+// IndexCapacityBlocks returns backend b's prefix index budget in blocks: its
+// KV capacity converted from tokens to canonical request bytes.
+func (c *Config) IndexCapacityBlocks(b int) int {
+	tokens := c.Routing.KVCapacityTokens
+	if override := c.Backends[b].KVCapacityTokens; override > 0 {
+		tokens = override
+	}
+	return max(1, int(float64(tokens)*c.Routing.BytesPerToken)/c.Routing.BlockBytes)
 }
 
 // Log configures logging.
@@ -141,6 +169,11 @@ func (c *Config) ApplyDefaults() {
 	setDefault(&c.Proxy.MaxIdleConnsPerHost, 256)
 
 	setDefault(&c.Routing.Policy, "round_robin")
+	setDefault(&c.Routing.BlockBytes, 128)
+	setDefault(&c.Routing.MaxBlocks, 4096)
+	setDefault(&c.Routing.IndexTTL, 10*time.Minute)
+	setDefault(&c.Routing.BytesPerToken, 4.0)
+	setDefault(&c.Routing.KVCapacityTokens, 100_000)
 	setDefault(&c.Log.Level, "info")
 }
 
@@ -168,6 +201,7 @@ func (c *Config) Validate() error {
 		"proxy.dial_timeout":            c.Proxy.DialTimeout,
 		"proxy.response_header_timeout": c.Proxy.ResponseHeaderTimeout,
 		"proxy.stream_idle_timeout":     c.Proxy.StreamIdleTimeout,
+		"routing.index_ttl":             c.Routing.IndexTTL,
 	}
 	for field, d := range positive {
 		if d <= 0 {
@@ -189,6 +223,18 @@ func (c *Config) Validate() error {
 	if c.Proxy.MaxIdleConnsPerHost < 1 {
 		fail("proxy.max_idle_conns_per_host", "must be at least 1, got %d", c.Proxy.MaxIdleConnsPerHost)
 	}
+	if c.Routing.BlockBytes < 8 {
+		fail("routing.block_bytes", "must be at least 8, got %d", c.Routing.BlockBytes)
+	}
+	if c.Routing.MaxBlocks < 1 {
+		fail("routing.max_blocks", "must be at least 1, got %d", c.Routing.MaxBlocks)
+	}
+	if c.Routing.BytesPerToken <= 0 {
+		fail("routing.bytes_per_token", "must be positive, got %g", c.Routing.BytesPerToken)
+	}
+	if c.Routing.KVCapacityTokens < 1 {
+		fail("routing.kv_capacity_tokens", "must be at least 1, got %d", c.Routing.KVCapacityTokens)
+	}
 	switch c.Log.Level {
 	case "debug", "info", "warn", "error":
 	default:
@@ -209,6 +255,9 @@ func (c *Config) Validate() error {
 		seen[b.ID] = true
 		if err := validateBackendURL(b.URL); err != nil {
 			fail(field+".url", "%v", err)
+		}
+		if b.KVCapacityTokens < 0 {
+			fail(field+".kv_capacity_tokens", "must not be negative, got %d", b.KVCapacityTokens)
 		}
 	}
 	return errors.Join(errs...)

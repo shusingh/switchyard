@@ -17,10 +17,11 @@ import (
 
 // Policy names accepted by New.
 const (
-	PolicyRoundRobin  = "round_robin"
-	PolicyRandom      = "random"
-	PolicyLeastLoaded = "least_loaded"
-	PolicyP2C         = "p2c"
+	PolicyRoundRobin     = "round_robin"
+	PolicyRandom         = "random"
+	PolicyLeastLoaded    = "least_loaded"
+	PolicyP2C            = "p2c"
+	PolicyPrefixAffinity = "prefix_affinity"
 )
 
 // ErrNoCandidates is returned when there is no healthy backend to choose.
@@ -29,6 +30,20 @@ var ErrNoCandidates = errors.New("no healthy backend")
 // Request describes the request being routed.
 type Request struct {
 	Model string
+	// Blocks is the number of prefix blocks in the request's key.
+	Blocks int
+	// Matched[b] is the number of leading blocks believed cached on the
+	// backend with Index() b. It is nil when prefix tracking is off.
+	Matched []int
+}
+
+// MatchedOn returns the number of the request's leading blocks believed
+// cached on b.
+func (r *Request) MatchedOn(b *backend.Backend) int {
+	if b.Index() >= len(r.Matched) {
+		return 0
+	}
+	return r.Matched[b.Index()]
 }
 
 // Policy chooses a backend for a request. Implementations must be safe for
@@ -43,7 +58,7 @@ type Policy interface {
 
 // Names returns the names of all available policies, sorted.
 func Names() []string {
-	names := []string{PolicyRoundRobin, PolicyRandom, PolicyLeastLoaded, PolicyP2C}
+	names := []string{PolicyRoundRobin, PolicyRandom, PolicyLeastLoaded, PolicyP2C, PolicyPrefixAffinity}
 	slices.Sort(names)
 	return names
 }
@@ -59,6 +74,8 @@ func New(name string) (Policy, error) {
 		return leastLoaded{}, nil
 	case PolicyP2C:
 		return p2c{}, nil
+	case PolicyPrefixAffinity:
+		return prefixAffinity{}, nil
 	default:
 		return nil, fmt.Errorf("unknown routing policy %q (valid: %v)", name, Names())
 	}
