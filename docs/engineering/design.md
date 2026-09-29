@@ -487,6 +487,14 @@ API and checks every declared length against the payload size before
 allocating. Fuzzing found that decoding into generic values let a 10-byte
 payload declare a 1.9-billion-entry map; that input is a regression test.
 
+**Verified live (2026-09-29).** Against the four vLLM 0.30 replicas, the
+router's key for a 509-token prompt, computed from `/tokenize` output, equals
+the key vLLM published in its `BlockStored` event (`d32b51541f725d2a`, 31
+blocks). vLLM publishes events from its engine loop, so an idle engine holds
+them until its next step: a cache reset on an idle replica reaches the router
+only when that replica next does work. Evictions happen while engines are
+busy, so this does not delay the information routing depends on.
+
 **Budget.** The index budget is the engines' real block count
 (`kv_capacity_tokens / engine_block_tokens`), and the estimator counts cached
 tokens in engine blocks.
