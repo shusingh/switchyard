@@ -394,17 +394,31 @@ blocks of this request are believed to be cached there.
 The index records what Switchyard **sent** where, not what the engine actually
 holds.
 
-- **Structure:** a map from block hash to a small set of `(backendID,
-  generation, lastUsed)` entries. Sharded by hash (for example, 64 shards, each
-  with its own `sync.RWMutex`) to keep lock contention low.
+- **Structure:** a map from block hash to a small slice of nodes, at most one
+  per backend, each holding `(backend, generation, lastUsed)`. One
+  `sync.RWMutex` guards the index: matches take the shared lock and run in
+  parallel, inserts take the exclusive lock. Sharding was the original plan;
+  it is deferred until a benchmark shows lock contention (simplest correct
+  version first).
 - **Insert (on route):** for the chosen backend, upsert every block hash of the
-  request with the current time.
-- **Match:** because cached prefixes are contiguous from the start (section 3),
-  "block i present on backend b" implies blocks 0..i-1 are present too. The
-  longest match per backend can therefore be found by **binary search** over the
-  hash chain: O(B log k) lookups for B backends and k blocks, instead of O(B k).
-  Start with the linear scan with early exit (simplest correct version), then
-  switch to binary search if benchmarks justify it.
+  request with the current time, **before** forwarding, so concurrent requests
+  with the same prefix see the belief immediately. Blocks are inserted last to
+  first, so the first block is the most recently used and an over-budget
+  backend evicts old prefixes from their tails, as vLLM does.
+- **Maintained under every policy.** Cache-blind baselines ignore the index but
+  still pay for keying, matching, and inserting, so per-request overhead is
+  identical when policies are compared.
+- **Match:** a single pass over the request's blocks. For block i, one map
+  lookup advances every backend whose match so far is exactly i; the pass ends
+  at the first block no backend holds. Cost is O(k) lookups for k blocks and it
+  allocates nothing. Measured on the development machine: about 44 µs for
+  1,024 blocks across 16 backends, 190 µs for 4,096.
+  - *Binary search was considered and rejected.* It would be about 20x faster
+    on 4,096-block prompts but assumes every cached prefix is contiguous from
+    the start. That does not hold exactly: when eviction orders of different
+    prefixes interleave, a later block can outlive an earlier one (the
+    simulator's cache test reproduces this). The linear pass is exact against
+    the index's state and its worst case fits the overhead budget.
 - **Capacity and eviction:** each backend has a block budget derived from its
   real KV capacity (configured, or read from vLLM at startup), converted to
   Switchyard blocks. Per-backend LRU order is maintained with an intrusive list;
@@ -638,13 +652,29 @@ alert.
 An OpenAI-compatible HTTP server that behaves like a vLLM replica closely enough
 to exercise routing policies:
 
-- A block-level prefix cache (hashing canonical bytes like the router, LRU,
-  fixed capacity).
-- A latency model: prefill time proportional to uncached tokens, a step-based
-  scheduler with a configurable batch size, per-token decode time that grows
-  with batch size, and SSE streaming of synthetic tokens.
-- Exposes vLLM-shaped `/metrics` (`num_requests_waiting`,
-  `prefix_cache_queries`, `prefix_cache_hits`, and so on) and `/health`.
+- **A KV cache modeled on vLLM's:** a fixed number of 16-token blocks; full
+  prompt blocks indexed by chained hash and shared between sequences;
+  reference-counted while sequences run; unreferenced blocks evicted least
+  recently used, tail of a prefix first; `/reset_prefix_cache`.
+- **A scheduler modeled on vLLM v1's:** first-come-first-served admission
+  into free cache space; each step spends a prefill token budget (chunked
+  prefill) and gives every decoding sequence one token; step time is a fixed
+  overhead plus prefill tokens over prefill throughput plus a per-sequence
+  decode cost. Queueing, batching, and interference emerge from this; latency
+  is never scripted.
+- **Independent of the router's keys.** The engine renders requests through
+  its own chat template and converts bytes to tokens with its own ratio, then
+  hashes 16-token blocks. The router hashes raw request bytes in its own block
+  size. If the simulator reused the router's keys, the router's cache
+  predictions would be perfect by construction and every simulated result
+  would flatter it.
+- **Calibrated token accounting.** The default 5.55 bytes per token matches the
+  benchmark's synthetic text, which Qwen2.5's tokenizer encodes at exactly one
+  token per word (verified word by word through vLLM's `/tokenize`), so
+  simulated working sets match the GPU setup's.
+- Exposes vLLM-shaped `/metrics` (`num_requests_running`,
+  `num_requests_waiting`, `kv_cache_usage_perc`, `prefix_cache_queries_total`,
+  `prefix_cache_hits_total`, `cache_config_info`) and `/health`.
 
 Uses: deterministic integration tests in CI (no GPU), fault injection (slow,
 failing, restarting replicas), and cheap policy experiments at 8 to 32 replicas.
