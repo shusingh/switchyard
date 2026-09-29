@@ -28,6 +28,8 @@ type Metrics struct {
 	PrefixMatchRatio prometheus.Histogram
 	PredictionError  prometheus.Histogram
 	RouteDecision    prometheus.Histogram
+	Tokenize         prometheus.Histogram
+	TokenizeFailures prometheus.Counter
 }
 
 // NewMetrics creates and registers the router's metrics, along with the Go
@@ -78,6 +80,15 @@ func NewMetrics() *Metrics {
 			Help:    "Absolute difference between predicted and measured time to first token.",
 			Buckets: latency,
 		}),
+		Tokenize: prometheus.NewHistogram(prometheus.HistogramOpts{
+			Name:    "switchyard_tokenize_seconds",
+			Help:    "Time to tokenize a request through an engine, in precise mode.",
+			Buckets: prometheus.ExponentialBuckets(0.0001, 2, 14), // 100us to about 0.8s
+		}),
+		TokenizeFailures: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "switchyard_tokenize_failures_total",
+			Help: "Requests routed without prefix information because tokenizing failed.",
+		}),
 		RouteDecision: prometheus.NewHistogram(prometheus.HistogramOpts{
 			Name:    "switchyard_route_decision_seconds",
 			Help:    "Router overhead per request: parsing, keying, matching, and picking a backend.",
@@ -87,6 +98,7 @@ func NewMetrics() *Metrics {
 	m.registry.MustRegister(
 		m.Requests, m.TTFT, m.TPOT, m.RequestDuration, m.QueueWait, m.Rejections,
 		m.Retries, m.PrefixMatchRatio, m.PredictionError, m.RouteDecision,
+		m.Tokenize, m.TokenizeFailures,
 		collectors.NewGoCollector(),
 		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
 	)

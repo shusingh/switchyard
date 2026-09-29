@@ -67,6 +67,12 @@ func (b *Backend) Report(o Outcome) { b.br.record(o) }
 // the server may have restarted with an empty cache.
 func (b *Backend) Generation() uint64 { return b.generation.Load() }
 
+// BaseURL returns a copy of the backend's base URL.
+func (b *Backend) BaseURL() *url.URL {
+	u := *b.base
+	return &u
+}
+
 // Endpoint returns the absolute URL for path and rawQuery on this backend.
 func (b *Backend) Endpoint(path, rawQuery string) *url.URL {
 	u := b.base.JoinPath(path)

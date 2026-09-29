@@ -111,6 +111,29 @@ func (ix *Index) Insert(b int, gen uint64, hashes []uint64) {
 	}
 }
 
+// Remove forgets that backend b holds hashes, as when the backend reports it
+// evicted them. Hashes it was not believed to hold are ignored.
+func (ix *Index) Remove(b int, hashes []uint64) {
+	ix.mu.Lock()
+	defer ix.mu.Unlock()
+	for _, h := range hashes {
+		if n := ix.find(h, b); n != nil {
+			ix.evict(n)
+		}
+	}
+}
+
+// Clear forgets everything backend b is believed to hold, as when it reports
+// its cache was cleared or its event stream can no longer be trusted.
+func (ix *Index) Clear(b int) {
+	ix.mu.Lock()
+	defer ix.mu.Unlock()
+	list := &ix.backends[b]
+	for list.tail != nil {
+		ix.evict(list.tail)
+	}
+}
+
 // Len returns the number of (block, backend) beliefs held.
 func (ix *Index) Len() int {
 	ix.mu.RLock()

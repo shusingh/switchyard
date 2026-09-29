@@ -132,6 +132,28 @@ func TestBackendsHaveIndependentBudgets(t *testing.T) {
 	}
 }
 
+func TestRemoveAndClear(t *testing.T) {
+	t.Parallel()
+	ix := NewIndex([]int{100, 100}, time.Hour, nil)
+	gens := []uint64{1, 1}
+	ix.Insert(0, 1, seq(1, 4))
+	ix.Insert(1, 1, seq(1, 4))
+
+	// Evicting block 3 on backend 0 cuts its match there; backend 1 keeps it.
+	ix.Remove(0, []uint64{3, 999})
+	if got := match(ix, seq(1, 4), gens); !slices.Equal(got, []int{2, 4}) {
+		t.Errorf("Match after Remove = %v, want [2 4]", got)
+	}
+
+	ix.Clear(1)
+	if got := match(ix, seq(1, 4), gens); !slices.Equal(got, []int{2, 0}) {
+		t.Errorf("Match after Clear(1) = %v, want [2 0]", got)
+	}
+	if ix.Len() != 3 {
+		t.Errorf("Len = %d, want 3 (backend 0's remaining blocks)", ix.Len())
+	}
+}
+
 func TestIndexConcurrentUse(t *testing.T) {
 	t.Parallel()
 	ix := NewIndex([]int{64, 64, 64, 64}, time.Hour, nil)

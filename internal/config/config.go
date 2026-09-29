@@ -61,6 +61,9 @@ type Backend struct {
 	// APIKey, if set, is sent to the backend as a bearer token. Client
 	// credentials are never forwarded to backends.
 	APIKey string `yaml:"api_key"`
+	// KVEventsEndpoint is the backend's KV cache event publisher, for
+	// example "tcp://localhost:5601". Required in precise mode.
+	KVEventsEndpoint string `yaml:"kv_events_endpoint"`
 }
 
 // Health configures active health checking of backends.
@@ -143,7 +146,24 @@ type Routing struct {
 	// TieEpsilon treats predictions within this fraction of the best as
 	// ties, chosen at random.
 	TieEpsilon float64 `yaml:"tie_epsilon"`
+
+	// PrefixMode is "approximate" (the default: hash request bytes, track
+	// what was routed where) or "precise" (tokenize through the engine, hash
+	// as vLLM does, and track the engines' KV cache events). See
+	// design.md section 7.4.
+	PrefixMode string `yaml:"prefix_mode"`
+	// EngineBlockTokens is the engines' KV block size in tokens (vLLM's
+	// --block-size). Used in precise mode.
+	EngineBlockTokens int `yaml:"engine_block_tokens"`
+	// KVEventsTopic is the topic the engines publish KV events on.
+	KVEventsTopic string `yaml:"kv_events_topic"`
 }
+
+// Prefix modes.
+const (
+	PrefixModeApproximate = "approximate"
+	PrefixModePrecise     = "precise"
+)
 
 // IndexCapacityBlocks returns backend b's prefix index budget in blocks: its
 // KV capacity converted from tokens to canonical request bytes.
@@ -151,6 +171,10 @@ func (c *Config) IndexCapacityBlocks(b int) int {
 	tokens := c.Routing.KVCapacityTokens
 	if override := c.Backends[b].KVCapacityTokens; override > 0 {
 		tokens = override
+	}
+	if c.Routing.PrefixMode == PrefixModePrecise {
+		// Precise keys are the engine's own blocks.
+		return max(1, tokens/c.Routing.EngineBlockTokens)
 	}
 	return max(1, int(float64(tokens)*c.Routing.BytesPerToken)/c.Routing.BlockBytes)
 }
@@ -265,6 +289,9 @@ func (c *Config) ApplyDefaults() {
 	setDefault(&c.Routing.BalanceAbs, 16)
 	setDefault(&c.Routing.BalanceRel, 1.5)
 	setDefault(&c.Routing.TieEpsilon, 0.05)
+	setDefault(&c.Routing.PrefixMode, PrefixModeApproximate)
+	setDefault(&c.Routing.EngineBlockTokens, 16)
+	setDefault(&c.Routing.KVEventsTopic, "kv-events")
 	setDefault(&c.Admission.MaxInFlight, 512)
 	setDefault(&c.Admission.QueueTimeout, 30*time.Second)
 	setDefault(&c.Admission.QuantumTokens, 4096)
@@ -344,6 +371,20 @@ func (c *Config) Validate() error {
 	}
 	if c.Routing.TieEpsilon < 0 || c.Routing.TieEpsilon > 1 {
 		fail("routing.tie_epsilon", "must be between 0 and 1, got %g", c.Routing.TieEpsilon)
+	}
+	switch c.Routing.PrefixMode {
+	case PrefixModeApproximate:
+	case PrefixModePrecise:
+		for i, b := range c.Backends {
+			if b.KVEventsEndpoint == "" {
+				fail(fmt.Sprintf("backends[%d].kv_events_endpoint", i), "required when routing.prefix_mode is precise")
+			}
+		}
+	default:
+		fail("routing.prefix_mode", "must be approximate or precise, got %q", c.Routing.PrefixMode)
+	}
+	if c.Routing.EngineBlockTokens < 1 {
+		fail("routing.engine_block_tokens", "must be at least 1, got %d", c.Routing.EngineBlockTokens)
 	}
 	if c.Routing.KVCapacityTokens < 1 {
 		fail("routing.kv_capacity_tokens", "must be at least 1, got %d", c.Routing.KVCapacityTokens)

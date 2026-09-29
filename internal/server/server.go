@@ -8,13 +8,16 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"log/slog"
 	"math"
 	"net/http"
+	"net/url"
 	"slices"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/shusingh/switchyard/internal/admission"
@@ -61,6 +64,17 @@ type Options struct {
 	RetryBudgetRatio float64
 	// Metrics receives per-request measurements.
 	Metrics *telemetry.Metrics
+	// Tokenizer, when set, turns on precise prefix keys: each request is
+	// tokenized by an engine and hashed into the engine's own block keys,
+	// which match its KV cache events. EngineBlockTokens is the engines'
+	// block size.
+	Tokenizer         Tokenizer
+	EngineBlockTokens int
+}
+
+// Tokenizer returns an engine's prompt token IDs for a request.
+type Tokenizer interface {
+	Tokens(ctx context.Context, base *url.URL, path string, body []byte) ([]uint64, error)
 }
 
 // Server serves the HTTP API. It is safe for concurrent use.
@@ -79,6 +93,9 @@ type Server struct {
 	maxRetries      int
 	retries         *retryBudget
 	metrics         *telemetry.Metrics
+	tokenizer       Tokenizer
+	blockTokens     int
+	tokenizeNext    atomic.Uint64 // spreads tokenize calls across backends
 }
 
 // New returns a Server with the given dependencies.
@@ -98,6 +115,8 @@ func New(opts Options) *Server {
 		maxRetries:      opts.MaxRetries,
 		retries:         newRetryBudget(opts.RetryBudgetRatio),
 		metrics:         opts.Metrics,
+		tokenizer:       opts.Tokenizer,
+		blockTokens:     opts.EngineBlockTokens,
 	}
 }
 
@@ -137,6 +156,9 @@ func (s *Server) handleInference(w http.ResponseWriter, r *http.Request) {
 	queueWait := time.Since(start)
 	// Route after admission, so the decision reflects load when the request
 	// actually runs rather than when it arrived.
+	if s.tokenizer != nil {
+		s.preciseKeys(r, body, &parsed, &promptTokens)
+	}
 	routeStart := time.Now()
 	route := s.newRoute(&parsed, promptTokens)
 	a, ok := s.forward(w, r, body, &parsed, route)
@@ -208,6 +230,36 @@ func (s *Server) readBody(w http.ResponseWriter, r *http.Request) ([]byte, bool)
 	}
 	openai.WriteError(w, http.StatusBadRequest, openai.ErrTypeInvalidRequest, "could not read request body")
 	return nil, false
+}
+
+// preciseKeys replaces the request's approximate keys with the engine's own
+// block keys, from token IDs an available engine computes. If tokenizing
+// fails the request is routed without prefix information rather than failed:
+// the keys only guide routing.
+func (s *Server) preciseKeys(r *http.Request, body []byte, parsed *prefix.Request, promptTokens *int64) {
+	parsed.Hashes = nil
+	candidates := s.pool.AppendAvailable(make([]*backend.Backend, 0, 8))
+	if len(candidates) == 0 {
+		return
+	}
+	b := candidates[s.tokenizeNext.Add(1)%uint64(len(candidates))]
+	start := time.Now()
+	tokens, err := s.tokenizer.Tokens(r.Context(), b.BaseURL(), r.URL.Path, body)
+	s.metrics.Tokenize.Observe(time.Since(start).Seconds())
+	if err != nil {
+		s.metrics.TokenizeFailures.Inc()
+		s.logger.Warn("tokenize failed; routing without prefix information",
+			slog.String("request_id", RequestID(r.Context())),
+			slog.String("backend", b.ID()),
+			slog.String("error", err.Error()))
+		return
+	}
+	*promptTokens = int64(len(tokens))
+	blocks := prefix.VLLMBlockHashes(tokens, s.blockTokens)
+	parsed.Hashes = make([]uint64, len(blocks))
+	for i, h := range blocks {
+		parsed.Hashes[i] = h.Low64()
+	}
 }
 
 // attempt is the outcome of forwarding a request, after any retries.

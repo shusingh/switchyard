@@ -40,6 +40,7 @@ type harness struct {
 	client  *http.Client
 	engines []*sim.Engine
 	checker *backend.HealthChecker
+	metrics *telemetry.Metrics
 }
 
 type harnessOptions struct {
@@ -52,6 +53,8 @@ type harnessOptions struct {
 	maxRetries      int
 	breaker         backend.BreakerConfig
 	estimator       *scheduler.Estimator
+	index           *prefix.Index
+	tokenizer       Tokenizer
 	// extraBackends are URLs of hand-built servers added after the engines.
 	extraBackends []string
 }
@@ -98,14 +101,22 @@ func newHarness(t *testing.T, opts harnessOptions) *harness {
 	})
 	t.Cleanup(px.CloseIdleConnections)
 
+	index := opts.index
+	if index == nil {
+		index = testIndex(len(backends))
+	}
+	h.metrics = telemetry.NewMetrics()
 	router := httptest.NewServer(New(Options{
-		Pool: pool, Policy: policy, Proxy: px, Keyer: testKeyer(), Index: testIndex(len(backends)), Estimator: estimatorOrDefault(opts.estimator, len(backends)),
-		Logger: slog.New(slog.DiscardHandler), MaxRequestBytes: opts.maxRequestBytes,
-		ExplainHeaders:   opts.explainHeaders,
-		Metrics:          telemetry.NewMetrics(),
-		Admission:        admissionOrDefault(t, opts.admission),
-		MaxRetries:       opts.maxRetries,
-		RetryBudgetRatio: 1,
+		Pool: pool, Policy: policy, Proxy: px, Keyer: testKeyer(), Index: index,
+		Estimator: estimatorOrDefault(opts.estimator, len(backends)),
+		Logger:    slog.New(slog.DiscardHandler), MaxRequestBytes: opts.maxRequestBytes,
+		ExplainHeaders:    opts.explainHeaders,
+		Metrics:           h.metrics,
+		Admission:         admissionOrDefault(t, opts.admission),
+		MaxRetries:        opts.maxRetries,
+		RetryBudgetRatio:  1,
+		Tokenizer:         opts.tokenizer,
+		EngineBlockTokens: 16,
 	}).Handler())
 	t.Cleanup(router.Close)
 

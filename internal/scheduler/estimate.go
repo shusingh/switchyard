@@ -27,6 +27,10 @@ type EstimatorConfig struct {
 	// BlockBytes is the prefix block size, for converting matched blocks to
 	// tokens.
 	BlockBytes int
+	// BlockTokens, when positive, means prefix blocks are the engine's own
+	// blocks of this many tokens (precise mode), so matched blocks convert to
+	// tokens exactly.
+	BlockTokens int
 }
 
 const (
@@ -73,7 +77,12 @@ func (e *Estimator) PromptTokens(canonicalBytes int) int64 {
 // would have to prefill, given the number of leading blocks believed cached
 // there.
 func (e *Estimator) UncachedTokens(promptTokens int64, matchedBlocks int) int64 {
-	cached := int64(float64(matchedBlocks*e.cfg.BlockBytes) / e.bytesPerToken.Load())
+	var cached int64
+	if e.cfg.BlockTokens > 0 {
+		cached = int64(matchedBlocks * e.cfg.BlockTokens)
+	} else {
+		cached = int64(float64(matchedBlocks*e.cfg.BlockBytes) / e.bytesPerToken.Load())
+	}
 	return max(promptTokens-cached, 0)
 }
 

@@ -12,15 +12,18 @@ import (
 	"net"
 	"net/http"
 	"sync"
+	"time"
 
 	"github.com/shusingh/switchyard/internal/admission"
 	"github.com/shusingh/switchyard/internal/backend"
 	"github.com/shusingh/switchyard/internal/config"
+	"github.com/shusingh/switchyard/internal/kvevents"
 	"github.com/shusingh/switchyard/internal/prefix"
 	"github.com/shusingh/switchyard/internal/proxy"
 	"github.com/shusingh/switchyard/internal/scheduler"
 	"github.com/shusingh/switchyard/internal/server"
 	"github.com/shusingh/switchyard/internal/telemetry"
+	"github.com/shusingh/switchyard/internal/tokenize"
 )
 
 // Router is a configured Switchyard instance.
@@ -32,17 +35,25 @@ type Router struct {
 	proxy   *proxy.Proxy
 	policy  scheduler.Policy
 	server  *server.Server
+	// subscribers feed the prefix index from the engines' KV cache events
+	// in precise mode; empty otherwise.
+	subscribers []*kvevents.Subscriber
 }
 
 // New builds a Router from cfg, which must already be validated.
 func New(cfg config.Config, logger *slog.Logger) (*Router, error) {
-	estimator := scheduler.NewEstimator(scheduler.EstimatorConfig{
+	precise := cfg.Routing.PrefixMode == config.PrefixModePrecise
+	estCfg := scheduler.EstimatorConfig{
 		InitialPrefillTokensPerSecond: cfg.Routing.PrefillTokensPerSecond,
 		Overhead:                      cfg.Routing.TTFTOverhead,
 		DecodePenalty:                 cfg.Routing.DecodePenalty,
 		InitialBytesPerToken:          cfg.Routing.BytesPerToken,
 		BlockBytes:                    cfg.Routing.BlockBytes,
-	}, len(cfg.Backends))
+	}
+	if precise {
+		estCfg.BlockTokens = cfg.Routing.EngineBlockTokens
+	}
+	estimator := scheduler.NewEstimator(estCfg, len(cfg.Backends))
 	policy, err := scheduler.New(cfg.Routing.Policy, scheduler.Options{
 		Estimator:  estimator,
 		BalanceAbs: int64(cfg.Routing.BalanceAbs),
@@ -74,30 +85,71 @@ func New(cfg config.Config, logger *slog.Logger) (*Router, error) {
 		return nil, fmt.Errorf("register state metrics: %w", err)
 	}
 
-	return &Router{
+	opts := server.Options{
+		Pool:              pool,
+		Policy:            policy,
+		Proxy:             px,
+		Keyer:             prefix.NewKeyer(cfg.Routing.BlockBytes, cfg.Routing.MaxBlocks),
+		Index:             index,
+		Estimator:         estimator,
+		Logger:            logger,
+		MaxRequestBytes:   cfg.Server.MaxRequestBytes,
+		ExplainHeaders:    cfg.Server.ExplainHeaders,
+		Admission:         admit,
+		TrustTenantHeader: cfg.Admission.TrustTenantHeader,
+		MaxRetries:        cfg.Proxy.MaxRetries,
+		RetryBudgetRatio:  cfg.Proxy.RetryBudgetRatio,
+		Metrics:           metrics,
+	}
+	r := &Router{
 		cfg:     cfg,
 		logger:  logger,
 		pool:    pool,
 		checker: backend.NewHealthChecker(pool, cfg.Health, logger),
 		proxy:   px,
 		policy:  policy,
-		server: server.New(server.Options{
-			Pool:              pool,
-			Policy:            policy,
-			Proxy:             px,
-			Keyer:             prefix.NewKeyer(cfg.Routing.BlockBytes, cfg.Routing.MaxBlocks),
-			Index:             index,
-			Estimator:         estimator,
-			Logger:            logger,
-			MaxRequestBytes:   cfg.Server.MaxRequestBytes,
-			ExplainHeaders:    cfg.Server.ExplainHeaders,
-			Admission:         admit,
-			TrustTenantHeader: cfg.Admission.TrustTenantHeader,
-			MaxRetries:        cfg.Proxy.MaxRetries,
-			RetryBudgetRatio:  cfg.Proxy.RetryBudgetRatio,
-			Metrics:           metrics,
-		}),
-	}, nil
+	}
+	if precise {
+		opts.Tokenizer = tokenize.New(&http.Client{Timeout: cfg.Proxy.ResponseHeaderTimeout})
+		opts.EngineBlockTokens = cfg.Routing.EngineBlockTokens
+		r.subscribers = newSubscribers(cfg, pool, index, logger)
+	}
+	r.server = server.New(opts)
+	return r, nil
+}
+
+// newSubscribers creates one KV event subscriber per backend. Stored and
+// removed blocks update the index directly; when a subscriber loses track of
+// a backend, everything believed about it is forgotten.
+func newSubscribers(cfg config.Config, pool *backend.Pool, index *prefix.Index, logger *slog.Logger) []*kvevents.Subscriber {
+	subs := make([]*kvevents.Subscriber, 0, len(cfg.Backends))
+	for i, b := range pool.Backends() {
+		subs = append(subs, &kvevents.Subscriber{
+			Endpoint:   cfg.Backends[i].KVEventsEndpoint,
+			Topic:      cfg.Routing.KVEventsTopic,
+			RetryDelay: time.Second,
+			Logger:     logger,
+			OnReset:    func() { index.Clear(b.Index()) },
+			OnEvents: func(events []kvevents.Event) {
+				for _, ev := range events {
+					// Only blocks in GPU memory avoid prefill; other tiers
+					// (CPU offload, storage) are not tracked.
+					if ev.Medium != "" && ev.Medium != "GPU" {
+						continue
+					}
+					switch ev.Kind {
+					case kvevents.BlockStored:
+						index.Insert(b.Index(), b.Generation(), ev.Hashes)
+					case kvevents.BlockRemoved:
+						index.Remove(b.Index(), ev.Hashes)
+					case kvevents.AllBlocksCleared:
+						index.Clear(b.Index())
+					}
+				}
+			},
+		})
+	}
+	return subs
 }
 
 func newAdmission(cfg config.Admission) (*admission.Controller, error) {
@@ -138,6 +190,9 @@ func (r *Router) Serve(ctx context.Context, ln net.Listener) error {
 	}()
 	r.checker.CheckAll(ctx) // serve immediately if backends are already up
 	wg.Go(func() { r.checker.Run(healthCtx) })
+	for _, s := range r.subscribers {
+		wg.Go(func() { s.Run(healthCtx) })
+	}
 
 	httpServer := &http.Server{
 		Handler:           r.server.Handler(),
