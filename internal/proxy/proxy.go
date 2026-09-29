@@ -125,6 +125,12 @@ func (p *Proxy) Forward(w http.ResponseWriter, r *http.Request, b *backend.Backe
 	copyHeaders(req.Header, r.Header)
 	// Compressed event streams cannot be relayed event by event.
 	req.Header.Del("Accept-Encoding")
+	// Clients authenticate to the router; their credentials never reach a
+	// backend, which gets its own key if it needs one.
+	req.Header.Del("Authorization")
+	if key := b.APIKey(); key != "" {
+		req.Header.Set("Authorization", "Bearer "+key)
+	}
 
 	resp, err := p.client.Do(req) //nolint:gosec // G704: target is operator-configured; see above
 	if err != nil {

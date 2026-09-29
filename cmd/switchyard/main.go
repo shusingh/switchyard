@@ -18,6 +18,7 @@ import (
 	"sync"
 	"syscall"
 
+	"github.com/shusingh/switchyard/internal/admission"
 	"github.com/shusingh/switchyard/internal/backend"
 	"github.com/shusingh/switchyard/internal/config"
 	"github.com/shusingh/switchyard/internal/prefix"
@@ -32,6 +33,29 @@ func main() {
 		fmt.Fprintln(os.Stderr, "switchyard:", err)
 		os.Exit(1)
 	}
+}
+
+func newAdmission(cfg config.Admission) (*admission.Controller, error) {
+	tenant := func(t config.Tenant) admission.TenantConfig {
+		return admission.TenantConfig{
+			Name:            t.Name,
+			APIKeys:         t.APIKeys,
+			Weight:          t.Weight,
+			TokensPerSecond: t.TokensPerSecond,
+			Burst:           t.Burst,
+			MaxQueued:       t.MaxQueued,
+		}
+	}
+	ac := admission.Config{
+		MaxInFlight:  cfg.MaxInFlight,
+		QueueTimeout: cfg.QueueTimeout,
+		Quantum:      cfg.QuantumTokens,
+		Default:      tenant(cfg.DefaultTenant),
+	}
+	for _, t := range cfg.Tenants {
+		ac.Tenants = append(ac.Tenants, tenant(t))
+	}
+	return admission.New(ac, nil)
 }
 
 func run() error {
@@ -70,6 +94,10 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	admit, err := newAdmission(cfg.Admission)
+	if err != nil {
+		return err
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -91,15 +119,17 @@ func run() error {
 		capacities[i] = cfg.IndexCapacityBlocks(i)
 	}
 	srv := server.New(server.Options{
-		Pool:            pool,
-		Policy:          policy,
-		Proxy:           proxy.New(cfg.Proxy),
-		Keyer:           prefix.NewKeyer(cfg.Routing.BlockBytes, cfg.Routing.MaxBlocks),
-		Index:           prefix.NewIndex(capacities, cfg.Routing.IndexTTL, nil),
-		Estimator:       estimator,
-		Logger:          logger,
-		MaxRequestBytes: cfg.Server.MaxRequestBytes,
-		ExplainHeaders:  cfg.Server.ExplainHeaders,
+		Pool:              pool,
+		Policy:            policy,
+		Proxy:             proxy.New(cfg.Proxy),
+		Keyer:             prefix.NewKeyer(cfg.Routing.BlockBytes, cfg.Routing.MaxBlocks),
+		Index:             prefix.NewIndex(capacities, cfg.Routing.IndexTTL, nil),
+		Estimator:         estimator,
+		Logger:            logger,
+		MaxRequestBytes:   cfg.Server.MaxRequestBytes,
+		ExplainHeaders:    cfg.Server.ExplainHeaders,
+		Admission:         admit,
+		TrustTenantHeader: cfg.Admission.TrustTenantHeader,
 	})
 	httpServer := &http.Server{
 		Addr:              cfg.Server.Listen,

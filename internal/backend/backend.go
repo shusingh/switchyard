@@ -13,9 +13,10 @@ import (
 // Backend is one model server. Its exported methods are safe for concurrent
 // use.
 type Backend struct {
-	id    string
-	index int
-	base  *url.URL
+	id     string
+	index  int
+	base   *url.URL
+	apiKey string
 
 	healthy    atomic.Bool
 	generation atomic.Uint64
@@ -35,6 +36,9 @@ type Backend struct {
 
 // ID returns the backend's configured identifier.
 func (b *Backend) ID() string { return b.id }
+
+// APIKey returns the bearer token to send to the backend, or "" if none.
+func (b *Backend) APIKey() string { return b.apiKey }
 
 // Index returns the backend's position in the pool, from 0. Per-backend state
 // elsewhere, such as the prefix index, is kept in slices indexed by it.
@@ -81,7 +85,7 @@ func NewPool(cfgs []config.Backend) (*Pool, error) {
 		if err != nil {
 			return nil, fmt.Errorf("backend %s: parse url: %w", c.ID, err)
 		}
-		p.backends = append(p.backends, &Backend{id: c.ID, index: i, base: u})
+		p.backends = append(p.backends, &Backend{id: c.ID, index: i, base: u, apiKey: c.APIKey})
 	}
 	return p, nil
 }

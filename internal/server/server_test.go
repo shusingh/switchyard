@@ -14,6 +14,7 @@ import (
 
 	"go.uber.org/goleak"
 
+	"github.com/shusingh/switchyard/internal/admission"
 	"github.com/shusingh/switchyard/internal/backend"
 	"github.com/shusingh/switchyard/internal/config"
 	"github.com/shusingh/switchyard/internal/openai"
@@ -44,6 +45,7 @@ type harnessOptions struct {
 	maxRequestBytes int64
 	skipHealthCheck bool
 	explainHeaders  bool
+	admission       *admission.Controller
 }
 
 func newHarness(t *testing.T, opts harnessOptions) *harness {
@@ -88,6 +90,7 @@ func newHarness(t *testing.T, opts harnessOptions) *harness {
 		Pool: pool, Policy: policy, Proxy: px, Keyer: testKeyer(), Index: testIndex(len(backends)), Estimator: testEstimator(len(backends)),
 		Logger: slog.New(slog.DiscardHandler), MaxRequestBytes: opts.maxRequestBytes,
 		ExplainHeaders: opts.explainHeaders,
+		Admission:      admissionOrDefault(t, opts.admission),
 	}).Handler())
 	t.Cleanup(router.Close)
 
@@ -96,6 +99,22 @@ func newHarness(t *testing.T, opts harnessOptions) *harness {
 	h.url = router.URL
 	h.client = &http.Client{Transport: transport, Timeout: 30 * time.Second}
 	return h
+}
+
+// admissionOrDefault returns c, or a permissive controller if c is nil.
+func admissionOrDefault(t *testing.T, c *admission.Controller) *admission.Controller {
+	t.Helper()
+	if c != nil {
+		return c
+	}
+	c, err := admission.New(admission.Config{
+		MaxInFlight: 1024, QueueTimeout: time.Second, Quantum: 4096,
+		Default: admission.TenantConfig{Name: "default", Weight: 1, MaxQueued: 1024},
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return c
 }
 
 func testKeyer() *prefix.Keyer { return prefix.NewKeyer(64, 4096) }
@@ -196,6 +215,55 @@ func TestPrefixAffinityKeepsSharedPrefixOnOneBackend(t *testing.T) {
 	}
 	if cached == 0 {
 		t.Error("the engine saw no prefix cache hits")
+	}
+}
+
+func TestTenantBudgetReturns429WithRetryAfter(t *testing.T) {
+	t.Parallel()
+	ac, err := admission.New(admission.Config{
+		MaxInFlight: 100, QueueTimeout: time.Second, Quantum: 4096,
+		Default: admission.TenantConfig{Name: "default", Weight: 1, MaxQueued: 10},
+		Tenants: []admission.TenantConfig{{
+			Name: "metered", APIKeys: []string{"sk-metered"}, Weight: 1, MaxQueued: 10,
+			TokensPerSecond: 1, Burst: 300, // room for one ~300-token request
+		}},
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := newHarness(t, harnessOptions{engines: fastEngines(1), admission: ac})
+	body := `{"model":"sim-model","max_tokens":250,"messages":[{"role":"user","content":"hi"}]}`
+	send := func(key string) *http.Response {
+		req, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, h.url+openai.PathChatCompletions, strings.NewReader(body))
+		req.Header.Set("Authorization", "Bearer "+key)
+		resp, err := h.client.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return resp
+	}
+
+	first := send("sk-metered")
+	_, _ = io.Copy(io.Discard, first.Body)
+	first.Body.Close()
+	if first.StatusCode != http.StatusOK {
+		t.Fatalf("first request status = %d, want 200", first.StatusCode)
+	}
+	second := send("sk-metered")
+	defer second.Body.Close()
+	if second.StatusCode != http.StatusTooManyRequests || second.Header.Get("Retry-After") == "" {
+		t.Errorf("over-budget request = %d, Retry-After %q; want 429 with a retry hint",
+			second.StatusCode, second.Header.Get("Retry-After"))
+	}
+	if e := decodeError(t, second); e.Type != openai.ErrTypeRateLimit {
+		t.Errorf("error type = %q, want %q", e.Type, openai.ErrTypeRateLimit)
+	}
+	// Another tenant's budget is untouched.
+	other := send("sk-someone-else")
+	_, _ = io.Copy(io.Discard, other.Body)
+	other.Body.Close()
+	if other.StatusCode != http.StatusOK {
+		t.Errorf("default tenant status = %d, want 200", other.StatusCode)
 	}
 }
 
@@ -345,7 +413,8 @@ func TestUnreachableBackendReturnsBadGateway(t *testing.T) {
 	t.Cleanup(px.CloseIdleConnections)
 	router := httptest.NewServer(New(Options{
 		Pool: pool, Policy: policy, Proxy: px, Keyer: testKeyer(), Index: testIndex(1), Estimator: testEstimator(1),
-		Logger: slog.New(slog.DiscardHandler), MaxRequestBytes: 1 << 20,
+		Admission: admissionOrDefault(t, nil),
+		Logger:    slog.New(slog.DiscardHandler), MaxRequestBytes: 1 << 20,
 	}).Handler())
 	t.Cleanup(router.Close)
 

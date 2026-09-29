@@ -20,12 +20,13 @@ import (
 
 // Config is the complete router configuration.
 type Config struct {
-	Server   Server    `yaml:"server"`
-	Backends []Backend `yaml:"backends"`
-	Health   Health    `yaml:"health"`
-	Proxy    Proxy     `yaml:"proxy"`
-	Routing  Routing   `yaml:"routing"`
-	Log      Log       `yaml:"log"`
+	Server    Server    `yaml:"server"`
+	Backends  []Backend `yaml:"backends"`
+	Health    Health    `yaml:"health"`
+	Proxy     Proxy     `yaml:"proxy"`
+	Routing   Routing   `yaml:"routing"`
+	Admission Admission `yaml:"admission"`
+	Log       Log       `yaml:"log"`
 }
 
 // Server configures the client-facing HTTP server.
@@ -57,6 +58,9 @@ type Backend struct {
 	URL string `yaml:"url"`
 	// KVCapacityTokens overrides routing.kv_capacity_tokens for this backend.
 	KVCapacityTokens int `yaml:"kv_capacity_tokens"`
+	// APIKey, if set, is sent to the backend as a bearer token. Client
+	// credentials are never forwarded to backends.
+	APIKey string `yaml:"api_key"`
 }
 
 // Health configures active health checking of backends.
@@ -138,6 +142,48 @@ func (c *Config) IndexCapacityBlocks(b int) int {
 	return max(1, int(float64(tokens)*c.Routing.BytesPerToken)/c.Routing.BlockBytes)
 }
 
+// Admission configures tenant budgets, the concurrency cap, and queuing. See
+// docs/engineering/design.md section 10.
+type Admission struct {
+	// MaxInFlight caps concurrently admitted requests across all tenants.
+	MaxInFlight int `yaml:"max_in_flight"`
+	// QueueTimeout bounds how long a request waits for capacity.
+	QueueTimeout time.Duration `yaml:"queue_timeout"`
+	// QuantumTokens is the fair-queuing credit per round, times a tenant's
+	// weight; set it near a typical request's cost in tokens.
+	QuantumTokens float64 `yaml:"quantum_tokens"`
+	// TrustTenantHeader identifies tenants by the X-Tenant-ID header. Enable
+	// it only behind a gateway that sets the header itself.
+	TrustTenantHeader bool `yaml:"trust_tenant_header"`
+	// DefaultTenant applies to requests that match no tenant.
+	DefaultTenant Tenant   `yaml:"default_tenant"`
+	Tenants       []Tenant `yaml:"tenants"`
+}
+
+// Tenant describes one client's share of capacity.
+type Tenant struct {
+	Name string `yaml:"name"`
+	// APIKeys identify the tenant from the request's bearer token.
+	APIKeys []string `yaml:"api_keys"`
+	// Weight is the tenant's share of capacity under contention.
+	Weight int `yaml:"weight"`
+	// TokensPerSecond is the tenant's sustained budget in estimated tokens;
+	// zero means unlimited. Burst is how far it may run ahead, defaulting to
+	// ten seconds of budget.
+	TokensPerSecond float64 `yaml:"tokens_per_second"`
+	Burst           float64 `yaml:"burst"`
+	// MaxQueued bounds the tenant's waiting requests.
+	MaxQueued int `yaml:"max_queued"`
+}
+
+func (t *Tenant) applyDefaults() {
+	setDefault(&t.Weight, 1)
+	setDefault(&t.MaxQueued, 256)
+	if t.TokensPerSecond > 0 {
+		setDefault(&t.Burst, 10*t.TokensPerSecond)
+	}
+}
+
 // Log configures logging.
 type Log struct {
 	// Level is one of "debug", "info", "warn", or "error".
@@ -202,6 +248,15 @@ func (c *Config) ApplyDefaults() {
 	setDefault(&c.Routing.BalanceAbs, 16)
 	setDefault(&c.Routing.BalanceRel, 1.5)
 	setDefault(&c.Routing.TieEpsilon, 0.05)
+	setDefault(&c.Admission.MaxInFlight, 512)
+	setDefault(&c.Admission.QueueTimeout, 30*time.Second)
+	setDefault(&c.Admission.QuantumTokens, 4096)
+	setDefault(&c.Admission.DefaultTenant.Name, "default")
+	c.Admission.DefaultTenant.applyDefaults()
+	for i := range c.Admission.Tenants {
+		c.Admission.Tenants[i].applyDefaults()
+	}
+
 	setDefault(&c.Log.Level, "info")
 }
 
@@ -230,6 +285,7 @@ func (c *Config) Validate() error {
 		"proxy.response_header_timeout": c.Proxy.ResponseHeaderTimeout,
 		"proxy.stream_idle_timeout":     c.Proxy.StreamIdleTimeout,
 		"routing.index_ttl":             c.Routing.IndexTTL,
+		"admission.queue_timeout":       c.Admission.QueueTimeout,
 	}
 	for field, d := range positive {
 		if d <= 0 {
@@ -274,6 +330,26 @@ func (c *Config) Validate() error {
 	}
 	if c.Routing.KVCapacityTokens < 1 {
 		fail("routing.kv_capacity_tokens", "must be at least 1, got %d", c.Routing.KVCapacityTokens)
+	}
+	if c.Admission.MaxInFlight < 1 {
+		fail("admission.max_in_flight", "must be at least 1, got %d", c.Admission.MaxInFlight)
+	}
+	if c.Admission.QuantumTokens <= 0 {
+		fail("admission.quantum_tokens", "must be positive, got %g", c.Admission.QuantumTokens)
+	}
+	tenants := map[string]bool{c.Admission.DefaultTenant.Name: true}
+	for i, t := range c.Admission.Tenants {
+		field := fmt.Sprintf("admission.tenants[%d]", i)
+		switch {
+		case t.Name == "":
+			fail(field+".name", "must not be empty")
+		case tenants[t.Name]:
+			fail(field+".name", "duplicate tenant %q", t.Name)
+		}
+		tenants[t.Name] = true
+		if t.Weight < 1 || t.MaxQueued < 0 || t.TokensPerSecond < 0 || t.Burst < 0 {
+			fail(field, "weight must be at least 1 and budgets must not be negative")
+		}
 	}
 	switch c.Log.Level {
 	case "debug", "info", "warn", "error":

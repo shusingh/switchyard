@@ -10,10 +10,13 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"math"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
+	"github.com/shusingh/switchyard/internal/admission"
 	"github.com/shusingh/switchyard/internal/backend"
 	"github.com/shusingh/switchyard/internal/openai"
 	"github.com/shusingh/switchyard/internal/prefix"
@@ -44,6 +47,11 @@ type Options struct {
 	// ExplainHeaders adds X-Switchyard-* headers describing each routing
 	// decision to responses.
 	ExplainHeaders bool
+	// Admission decides whether and when each request may run.
+	Admission *admission.Controller
+	// TrustTenantHeader identifies tenants by the X-Tenant-ID header instead
+	// of the bearer token.
+	TrustTenantHeader bool
 }
 
 // Server serves the HTTP API. It is safe for concurrent use.
@@ -57,6 +65,8 @@ type Server struct {
 	logger          *slog.Logger
 	maxRequestBytes int64
 	explainHeaders  bool
+	admission       *admission.Controller
+	trustTenantHdr  bool
 }
 
 // New returns a Server with the given dependencies.
@@ -71,6 +81,8 @@ func New(opts Options) *Server {
 		logger:          opts.Logger,
 		maxRequestBytes: opts.MaxRequestBytes,
 		explainHeaders:  opts.ExplainHeaders,
+		admission:       opts.Admission,
+		trustTenantHdr:  opts.TrustTenantHeader,
 	}
 }
 
@@ -99,9 +111,18 @@ func (s *Server) handleInference(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	route := s.newRoute(&parsed)
+	promptTokens := s.estimator.PromptTokens(parsed.CanonicalBytes)
+	grant, ok := s.admit(w, r, promptTokens+outputEstimate(parsed.Fields))
+	if !ok {
+		return
+	}
+	queueWait := time.Since(start)
+	// Route after admission, so the decision reflects load when the request
+	// actually runs rather than when it arrived.
+	route := s.newRoute(&parsed, promptTokens)
 	b, ok := s.pick(w, route)
 	if !ok {
+		grant.Release(0)
 		s.logger.Warn("no healthy backend",
 			slog.String("request_id", RequestID(r.Context())),
 			slog.String("model", route.Model))
@@ -124,6 +145,11 @@ func (s *Server) handleInference(w http.ResponseWriter, r *http.Request) {
 	res, err := s.proxy.Forward(w, r, b, body, ticket.FirstToken)
 	ticket.Done()
 	s.learn(b, ticket, &parsed, &res)
+	actualCost := -1.0 // keep the estimate unless usage says otherwise
+	if res.Usage != nil {
+		actualCost = float64(res.Usage.PromptTokens + res.Usage.CompletionTokens)
+	}
+	grant.Release(actualCost)
 
 	status := res.Status
 	switch {
@@ -135,8 +161,8 @@ func (s *Server) handleInference(w http.ResponseWriter, r *http.Request) {
 		openai.WriteError(w, status, openai.ErrTypeServer, "backend request failed")
 	}
 	s.logRequest(r, requestLog{
-		start: start, bodyBytes: len(body), parsed: &parsed, route: route, backend: b,
-		uncached: uncached, status: status, res: &res, err: err,
+		start: start, queueWait: queueWait, tenant: grant.Tenant(), bodyBytes: len(body),
+		parsed: &parsed, route: route, backend: b, uncached: uncached, status: status, res: &res, err: err,
 	})
 }
 
@@ -171,15 +197,58 @@ func (s *Server) readBody(w http.ResponseWriter, r *http.Request) ([]byte, bool)
 	return nil, false
 }
 
+// defaultOutputEstimate is the output charged to a request that sets no
+// output limit, until its actual usage corrects the charge.
+const defaultOutputEstimate = 256
+
+func outputEstimate(f openai.RoutingFields) int64 {
+	if n := f.MaxOutputTokens(); n > 0 {
+		return int64(n)
+	}
+	return defaultOutputEstimate
+}
+
+// HeaderTenantID names the tenant when TrustTenantHeader is set.
+const HeaderTenantID = "X-Tenant-ID"
+
+// admit identifies the request's tenant and waits for admission. It writes
+// the rejection and returns false if the request may not run.
+func (s *Server) admit(w http.ResponseWriter, r *http.Request, cost int64) (*admission.Grant, bool) {
+	tenant := s.admission.TenantForKey(bearerToken(r.Header))
+	if s.trustTenantHdr && r.Header.Get(HeaderTenantID) != "" {
+		tenant = r.Header.Get(HeaderTenantID)
+	}
+	grant, err := s.admission.Admit(r.Context(), tenant, float64(cost))
+	if err == nil {
+		return grant, true
+	}
+	if reject, ok := errors.AsType[*admission.RejectError](err); ok {
+		seconds := max(1, int(math.Ceil(reject.RetryAfter.Seconds())))
+		w.Header().Set("Retry-After", strconv.Itoa(seconds))
+		openai.WriteError(w, http.StatusTooManyRequests, openai.ErrTypeRateLimit, reject.Error())
+	}
+	// Otherwise the client went away while waiting; there is no one to
+	// answer.
+	return nil, false
+}
+
+func bearerToken(h http.Header) string {
+	token, ok := strings.CutPrefix(h.Get("Authorization"), "Bearer ")
+	if !ok {
+		return ""
+	}
+	return strings.TrimSpace(token)
+}
+
 // newRoute describes a parsed request to the scheduler: its size and how
 // much of it each backend is believed to cache.
-func (s *Server) newRoute(parsed *prefix.Request) *scheduler.Request {
+func (s *Server) newRoute(parsed *prefix.Request, promptTokens int64) *scheduler.Request {
 	backends := len(s.pool.Backends())
 	route := &scheduler.Request{
 		Model:        parsed.Fields.Model,
 		Blocks:       len(parsed.Hashes),
 		Matched:      make([]int, backends),
-		PromptTokens: s.estimator.PromptTokens(parsed.CanonicalBytes),
+		PromptTokens: promptTokens,
 	}
 	s.index.Match(parsed.Hashes, s.pool.Generations(make([]uint64, 0, backends)), route.Matched)
 	return route
@@ -198,6 +267,8 @@ func (s *Server) learn(b *backend.Backend, ticket *backend.Ticket, parsed *prefi
 // requestLog gathers what the access log line reports about one request.
 type requestLog struct {
 	start     time.Time
+	queueWait time.Duration
+	tenant    string
 	bodyBytes int
 	parsed    *prefix.Request
 	route     *scheduler.Request
@@ -214,6 +285,7 @@ func (s *Server) logRequest(r *http.Request, l requestLog) {
 	attrs := []slog.Attr{
 		slog.String("request_id", RequestID(r.Context())),
 		slog.String("path", r.URL.Path),
+		slog.String("tenant", l.tenant),
 		slog.String("model", l.route.Model),
 		slog.Bool("stream", l.parsed.Fields.Stream),
 		slog.String("policy", s.policy.Name()),
@@ -227,6 +299,7 @@ func (s *Server) logRequest(r *http.Request, l requestLog) {
 		slog.Int("request_bytes", l.bodyBytes),
 		slog.Int64("response_bytes", l.res.BytesWritten),
 		slog.Duration("duration", time.Since(l.start)),
+		slog.Duration("queue_wait", l.queueWait),
 		slog.Duration("first_byte", l.res.FirstByte),
 	}
 	if l.res.Streamed {

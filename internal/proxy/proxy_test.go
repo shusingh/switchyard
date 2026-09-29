@@ -113,6 +113,9 @@ func TestForwardNonStreamingPreservesStatusAndHeaders(t *testing.T) {
 		if r.Header.Get("X-Keep-Me") != "yes" {
 			t.Error("upstream did not receive an end-to-end header")
 		}
+		if r.Header.Get("Authorization") != "" {
+			t.Error("upstream received the client's credentials")
+		}
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("X-Backend-Header", "present")
 		w.WriteHeader(http.StatusBadRequest)
@@ -126,6 +129,7 @@ func TestForwardNonStreamingPreservesStatusAndHeaders(t *testing.T) {
 	req.Header.Set("Connection", "X-Drop-Me")
 	req.Header.Set("X-Drop-Me", "1")
 	req.Header.Set("X-Keep-Me", "yes")
+	req.Header.Set("Authorization", "Bearer client-secret")
 	resp, err := http.DefaultTransport.RoundTrip(req)
 	if err != nil {
 		t.Fatal(err)
