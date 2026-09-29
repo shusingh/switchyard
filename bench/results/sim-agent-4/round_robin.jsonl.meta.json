@@ -1,0 +1,26 @@
+{
+  "label": "round_robin (4 replicas, simulated)",
+  "workload": "agent",
+  "parameters": {
+    "backends": "http://localhost:9001,http://localhost:9002,http://localhost:9003,http://localhost:9004",
+    "duration": "5m0s",
+    "label": "round_robin (4 replicas, simulated)",
+    "model": "sim-model",
+    "out": "bench/results/sim-agent-4/round_robin.jsonl",
+    "rate": "0.5",
+    "url": "http://localhost:8080",
+    "workload": "agent"
+  },
+  "requests": 1657,
+  "started": "2026-09-29T07:18:32.4936274-07:00",
+  "finished": "2026-09-29T07:27:18.9389174-07:00",
+  "cache_before": {
+    "queries": 0,
+    "hits": 0
+  },
+  "cache_after": {
+    "queries": 11200160,
+    "hits": 5143136
+  },
+  "cache_hit_rate": 0.45920201139983713
+}
