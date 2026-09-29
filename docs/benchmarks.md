@@ -161,6 +161,36 @@ The cache hit rate is vLLM's own counter. No request failed.
   feeds, not in index accuracy; it inherits the estimated_ttft behavior
   above.
 
+### Hot prefix
+
+Two system prompts with Zipf skew 4, so one prompt dominates, at 1.0
+sessions per second.
+
+Simulated, independent replicas
+(`scripts/bench-sim.sh bench/results/sim-hot-prefix-4 4 "least_loaded prefix_affinity estimated_ttft" -workload agent -duration 5m -rate 1.0 -apps 2 -app-skew 4`):
+
+| Policy | Cache hit rate | TTFT p50 | TTFT p99 | Goodput (TTFT <= 2 s) |
+|---|---:|---:|---:|---:|
+| least_loaded | 65.2% | 210 ms | 981 ms | 100.0% |
+| prefix_affinity | 62.2% | 20.42 s | 35.88 s | 18.7% |
+| estimated_ttft | 85.1% | 59 ms | 501 ms | 100.0% |
+
+prefix_affinity piles the dominant prefix onto one replica; estimated_ttft
+replicates it as far as load requires and keeps the highest hit rate.
+
+GPU, same workload, three trials, medians
+(`scripts/bench-gpu.sh bench/results/gpu-hot-prefix "least_loaded prefix_affinity estimated_ttft" 3 -workload agent -apps 2 -app-skew 4 -rate 1.0 -duration 5m`):
+
+| Policy | Cache hit rate | TTFT p50 | TTFT p99 | Goodput (TTFT <= 2 s) |
+|---|---:|---:|---:|---:|
+| least_loaded | 58.4% | 10.24 s | 22.88 s | 23.0% |
+| prefix_affinity | 62.5% | 10.65 s | 15.98 s | 24.0% |
+| estimated_ttft | 62.3% | 7.32 s | 19.61 s | 29.5% |
+
+At this rate the shared GPU is saturated under every policy, and the
+simulated advantage does not carry over: there is no idle compute to spread
+the hot prefix onto (ADR 0012).
+
 ### Simulated, agent workload, four replicas on one shared device
 
 `SHARED_DEVICE=1 scripts/bench-sim.sh bench/results/sim-agent-4-shared 4 "round_robin least_loaded prefix_affinity estimated_ttft" -workload agent -duration 5m -rate 0.5`

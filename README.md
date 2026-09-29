@@ -4,12 +4,17 @@ A prefix-cache-aware router for LLM inference, written in Go.
 
 Switchyard sits in front of a pool of OpenAI-compatible model servers such as
 [vLLM](https://github.com/vllm-project/vllm) and sends each request to the
-replica that can serve it fastest. It weighs how much of the prompt each
-replica already holds in its KV cache against how busy that replica is, and
-routes on the predicted **time to first token**.
+replica that can serve it fastest. It tracks which prompt prefixes each
+replica holds in its KV cache and routes related requests to the replica
+that can reuse them, balancing that against load.
 
-**Status:** feature-complete for its first release; formal GPU benchmarks in
-progress. See [the plan](docs/engineering/plan.md).
+On four vLLM replicas, cache-aware routing reached **2.5 times the cache hit
+rate of round-robin and cut median time to first token from 3.9 s to 241 ms**
+on an agent workload ([results](#benchmarks)).
+
+**Status:** feature-complete for its first release; GPU benchmarks recorded
+in [docs/benchmarks.md](docs/benchmarks.md). See
+[the plan](docs/engineering/plan.md).
 
 ## Why
 
@@ -65,8 +70,8 @@ The full design, including the decisions and the alternatives rejected, is in
 
 | Policy | Chooses | Role |
 |---|---|---|
-| `estimated_ttft` | Lowest predicted time to first token | Switchyard's policy |
-| `prefix_affinity` | Longest cached prefix, ties by load | Cache-only baseline |
+| `prefix_affinity` | Longest cached prefix, ties by load | Recommended default |
+| `estimated_ttft` | Lowest predicted time to first token | Replicas with their own accelerators |
 | `least_loaded` | Fewest in-flight requests | Load-only baseline |
 | `p2c` | Less loaded of two random replicas | Load-only baseline |
 | `round_robin` | Next in rotation | Common default |
@@ -74,6 +79,14 @@ The full design, including the decisions and the alternatives rejected, is in
 
 Every policy runs through the same request path, and prefix tracking runs
 under all of them, so comparisons are fair.
+
+`estimated_ttft` trades cache reuse against queueing in one unit, seconds, so
+it can spread a hot prefix across replicas when its owner is overloaded. In
+simulation with independent replicas and one dominant prefix, that kept
+every request under a 2 s TTFT (p50 59 ms) where `prefix_affinity` managed
+18.7%. On replicas that
+share one GPU, spreading buys no extra compute and `prefix_affinity` wins;
+see [ADR 0012](docs/adr/0012-shared-accelerator-routing.md).
 
 ## Quick start (no GPU needed)
 
@@ -128,8 +141,19 @@ documented in [configs/switchyard.example.yaml](configs/switchyard.example.yaml)
 The load generator (`cmd/loadgen`) replays synthetic agent sessions,
 shared-prefix traffic, and the public [Mooncake](https://github.com/kvcache-ai/Mooncake)
 production traces open-loop, so latency includes queueing as real clients see
-it. Results, methodology, and exact commands to reproduce them will be in
-`docs/benchmarks.md`.
+it. Methodology, full tables, and the exact commands are in
+[docs/benchmarks.md](docs/benchmarks.md).
+
+Agent workload on four vLLM replicas of Qwen2.5-1.5B-Instruct sharing one
+RTX 4090, three trials per policy, medians (cache hit rate is vLLM's own
+counter):
+
+| Policy | Cache hit rate | TTFT p50 | TTFT p99 | Requests under 2 s TTFT |
+|---|---:|---:|---:|---:|
+| round_robin | 32.7% | 3.91 s | 23.58 s | 37.0% |
+| least_loaded | 31.3% | 6.15 s | 21.52 s | 30.8% |
+| prefix_affinity | 81.7% | 241 ms | 4.43 s | 92.6% |
+| estimated_ttft | 62.7% | 688 ms | 7.64 s | 64.7% |
 
 Router overhead, measured on Linux against an instant backend at 1,000
 requests per second: **104 µs added at p50, 472 µs at p99.**
