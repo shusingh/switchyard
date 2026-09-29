@@ -11,6 +11,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/shusingh/switchyard/internal/backend"
@@ -40,6 +41,9 @@ type Options struct {
 	Estimator       *scheduler.Estimator
 	Logger          *slog.Logger
 	MaxRequestBytes int64
+	// ExplainHeaders adds X-Switchyard-* headers describing each routing
+	// decision to responses.
+	ExplainHeaders bool
 }
 
 // Server serves the HTTP API. It is safe for concurrent use.
@@ -52,6 +56,7 @@ type Server struct {
 	estimator       *scheduler.Estimator
 	logger          *slog.Logger
 	maxRequestBytes int64
+	explainHeaders  bool
 }
 
 // New returns a Server with the given dependencies.
@@ -65,6 +70,7 @@ func New(opts Options) *Server {
 		estimator:       opts.Estimator,
 		logger:          opts.Logger,
 		maxRequestBytes: opts.MaxRequestBytes,
+		explainHeaders:  opts.ExplainHeaders,
 	}
 }
 
@@ -111,6 +117,9 @@ func (s *Server) handleInference(w http.ResponseWriter, r *http.Request) {
 		// reports the same prediction-error measure.
 		route.PredictedTTFT = s.estimator.TTFT(b, uncached)
 	}
+	if s.explainHeaders {
+		explain(w.Header(), b, route)
+	}
 	ticket := b.Admit(uncached)
 	res, err := s.proxy.Forward(w, r, b, body, ticket.FirstToken)
 	ticket.Done()
@@ -129,6 +138,21 @@ func (s *Server) handleInference(w http.ResponseWriter, r *http.Request) {
 		start: start, bodyBytes: len(body), parsed: &parsed, route: route, backend: b,
 		uncached: uncached, status: status, res: &res, err: err,
 	})
+}
+
+// Explain headers, sent when enabled. See Options.ExplainHeaders.
+const (
+	HeaderBackend         = "X-Switchyard-Backend"
+	HeaderMatchedBlocks   = "X-Switchyard-Matched-Blocks"
+	HeaderPromptBlocks    = "X-Switchyard-Prompt-Blocks"
+	HeaderPredictedTTFTMS = "X-Switchyard-Predicted-TTFT-Ms"
+)
+
+func explain(h http.Header, b *backend.Backend, route *scheduler.Request) {
+	h.Set(HeaderBackend, b.ID())
+	h.Set(HeaderMatchedBlocks, strconv.Itoa(route.MatchedOn(b)))
+	h.Set(HeaderPromptBlocks, strconv.Itoa(route.Blocks))
+	h.Set(HeaderPredictedTTFTMS, strconv.FormatFloat(float64(route.PredictedTTFT)/float64(time.Millisecond), 'f', 1, 64))
 }
 
 // readBody reads the request body within the size limit, or writes an error

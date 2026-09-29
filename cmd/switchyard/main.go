@@ -99,6 +99,7 @@ func run() error {
 		Estimator:       estimator,
 		Logger:          logger,
 		MaxRequestBytes: cfg.Server.MaxRequestBytes,
+		ExplainHeaders:  cfg.Server.ExplainHeaders,
 	})
 	httpServer := &http.Server{
 		Addr:              cfg.Server.Listen,

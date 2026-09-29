@@ -111,6 +111,25 @@ func TestSummarize(t *testing.T) {
 	}
 }
 
+func TestSummarizePredictionsAndBelievedHits(t *testing.T) {
+	t.Parallel()
+	records := []Record{
+		{TTFTMS: 100, PredictedTTFTMS: 120, MatchedBlocks: 8, PromptBlocks: 10, Status: http.StatusOK},
+		{TTFTMS: 100, PredictedTTFTMS: 90, MatchedBlocks: 0, PromptBlocks: 10, Status: http.StatusOK},
+		{TTFTMS: 100, PredictedTTFTMS: 100, MatchedBlocks: 2, PromptBlocks: 20, Status: http.StatusOK},
+	}
+	s := Summarize(records, time.Second)
+	if s.PredictionError.P50 != 10 || s.PredictionError.Max != 20 {
+		t.Errorf("prediction error = %+v, want p50 10 and max 20", s.PredictionError)
+	}
+	if s.PredictionBiasMS != 0 {
+		t.Errorf("prediction bias = %v, want 0 (median of +20, -10, 0)", s.PredictionBiasMS)
+	}
+	if want := 10.0 / 40.0; math.Abs(s.BelievedHitRate-want) > 1e-9 {
+		t.Errorf("believed hit rate = %v, want %v", s.BelievedHitRate, want)
+	}
+}
+
 func TestQuantile(t *testing.T) {
 	t.Parallel()
 	v := []float64{10, 20, 30, 40, 50}

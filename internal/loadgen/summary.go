@@ -33,6 +33,16 @@ type Summary struct {
 	// Goodput is the fraction of requests that succeeded with TTFT within
 	// the objective.
 	Goodput float64 `json:"goodput"`
+	// PredictionError holds percentiles of |predicted - actual| TTFT over
+	// requests the router annotated with a prediction.
+	PredictionError Percentiles `json:"prediction_error_ms"`
+	// PredictionBiasMS is the median of predicted minus actual TTFT:
+	// positive means the router overestimates.
+	PredictionBiasMS float64 `json:"prediction_bias_ms"`
+	// BelievedHitRate is the fraction of prompt blocks the router believed
+	// were cached on the chosen backend. Compared with the engines' measured
+	// hit rate it shows how far the router's index drifts from reality.
+	BelievedHitRate float64 `json:"believed_hit_rate"`
 }
 
 // Percentiles holds latency percentiles in milliseconds.
@@ -47,7 +57,8 @@ type Percentiles struct {
 // only; failures are counted separately and lower goodput.
 func Summarize(records []Record, slo time.Duration) Summary {
 	s := Summary{Requests: len(records), SLOMS: ms(slo)}
-	var ttft, tpot, e2e []float64
+	var ttft, tpot, e2e, predErr, predBias []float64
+	matchedBlocks, promptBlocks := 0, 0
 	first, last := math.Inf(1), math.Inf(-1)
 	outputTokens, good := 0, 0
 	for i := range records {
@@ -68,6 +79,12 @@ func Summarize(records []Record, slo time.Duration) Summary {
 		if r.TTFTMS <= s.SLOMS {
 			good++
 		}
+		if r.PredictedTTFTMS > 0 {
+			predErr = append(predErr, math.Abs(r.PredictedTTFTMS-r.TTFTMS))
+			predBias = append(predBias, r.PredictedTTFTMS-r.TTFTMS)
+		}
+		matchedBlocks += r.MatchedBlocks
+		promptBlocks += r.PromptBlocks
 	}
 	if s.Requests > 0 {
 		s.Goodput = float64(good) / float64(s.Requests)
@@ -78,6 +95,11 @@ func Summarize(records []Record, slo time.Duration) Summary {
 		s.OutputTokensPerSec = float64(outputTokens) / span
 	}
 	s.TTFT, s.TPOT, s.E2E = percentiles(ttft), percentiles(tpot), percentiles(e2e)
+	s.PredictionError = percentiles(predErr)
+	s.PredictionBiasMS = percentiles(predBias).P50
+	if promptBlocks > 0 {
+		s.BelievedHitRate = float64(matchedBlocks) / float64(promptBlocks)
+	}
 	return s
 }
 

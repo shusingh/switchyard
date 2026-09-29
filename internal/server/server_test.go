@@ -43,6 +43,7 @@ type harnessOptions struct {
 	policy          scheduler.Policy
 	maxRequestBytes int64
 	skipHealthCheck bool
+	explainHeaders  bool
 }
 
 func newHarness(t *testing.T, opts harnessOptions) *harness {
@@ -86,6 +87,7 @@ func newHarness(t *testing.T, opts harnessOptions) *harness {
 	router := httptest.NewServer(New(Options{
 		Pool: pool, Policy: policy, Proxy: px, Keyer: testKeyer(), Index: testIndex(len(backends)), Estimator: testEstimator(len(backends)),
 		Logger: slog.New(slog.DiscardHandler), MaxRequestBytes: opts.maxRequestBytes,
+		ExplainHeaders: opts.explainHeaders,
 	}).Handler())
 	t.Cleanup(router.Close)
 
@@ -194,6 +196,22 @@ func TestPrefixAffinityKeepsSharedPrefixOnOneBackend(t *testing.T) {
 	}
 	if cached == 0 {
 		t.Error("the engine saw no prefix cache hits")
+	}
+}
+
+func TestExplainHeaders(t *testing.T) {
+	t.Parallel()
+	for _, enabled := range []bool{false, true} {
+		h := newHarness(t, harnessOptions{engines: fastEngines(1), explainHeaders: enabled})
+		resp := h.post(t, context.Background(), openai.PathChatCompletions,
+			`{"model":"sim-model","messages":[{"role":"user","content":"`+strings.Repeat("x", 500)+`"}]}`)
+		_, _ = io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+		got := resp.Header.Get(HeaderBackend) != "" && resp.Header.Get(HeaderPredictedTTFTMS) != "" &&
+			resp.Header.Get(HeaderPromptBlocks) != "" && resp.Header.Get(HeaderMatchedBlocks) != ""
+		if got != enabled {
+			t.Errorf("explain headers enabled=%v: headers present=%v; response headers %v", enabled, got, resp.Header)
+		}
 	}
 }
 

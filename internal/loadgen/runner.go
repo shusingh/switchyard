@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -28,9 +29,15 @@ import (
 // would turn the open loop into a closed one and hide the overload.
 var ErrClientOverloaded = errors.New("load generator at max in-flight requests")
 
-// headerBackend names the backend that served a request, when the router is
-// configured to say.
-const headerBackend = "X-Switchyard-Backend"
+// Explain headers the router sends when configured to (see
+// server.HeaderBackend). They are read by name here so the load generator
+// works against any endpoint.
+const (
+	headerBackend       = "X-Switchyard-Backend"
+	headerMatchedBlocks = "X-Switchyard-Matched-Blocks"
+	headerPromptBlocks  = "X-Switchyard-Prompt-Blocks"
+	headerPredictedTTFT = "X-Switchyard-Predicted-TTFT-Ms"
+)
 
 // Config configures a run.
 type Config struct {
@@ -65,7 +72,12 @@ type Record struct {
 	CompletionTokens int     `json:"completion_tokens"`
 	Status           int     `json:"status"`
 	Backend          string  `json:"backend,omitempty"`
-	Error            string  `json:"error,omitempty"`
+	// MatchedBlocks, PromptBlocks, and PredictedTTFTMS come from the
+	// router's explain headers, when enabled.
+	MatchedBlocks   int     `json:"matched_blocks,omitempty"`
+	PromptBlocks    int     `json:"prompt_blocks,omitempty"`
+	PredictedTTFTMS float64 `json:"predicted_ttft_ms,omitempty"`
+	Error           string  `json:"error,omitempty"`
 }
 
 // OK reports whether the request completed successfully.
@@ -171,6 +183,9 @@ func (r *runner) send(ctx context.Context, turn *workload.Turn) Record {
 	defer resp.Body.Close()
 	rec.Status = resp.StatusCode
 	rec.Backend = resp.Header.Get(headerBackend)
+	rec.MatchedBlocks, _ = strconv.Atoi(resp.Header.Get(headerMatchedBlocks))
+	rec.PromptBlocks, _ = strconv.Atoi(resp.Header.Get(headerPromptBlocks))
+	rec.PredictedTTFTMS, _ = strconv.ParseFloat(resp.Header.Get(headerPredictedTTFT), 64)
 	if resp.StatusCode != http.StatusOK {
 		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
 		rec.Error = fmt.Sprintf("status %d: %s", resp.StatusCode, bytes.TrimSpace(msg))

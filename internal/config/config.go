@@ -42,6 +42,10 @@ type Server struct {
 	// ShutdownTimeout bounds how long in-flight requests may run after a
 	// shutdown signal before they are cancelled.
 	ShutdownTimeout time.Duration `yaml:"shutdown_timeout"`
+	// ExplainHeaders adds X-Switchyard-* response headers describing each
+	// routing decision. They reveal internal topology, so they are off by
+	// default; benchmarks turn them on to measure prediction error.
+	ExplainHeaders bool `yaml:"explain_headers"`
 }
 
 // Backend is one OpenAI-compatible model server.

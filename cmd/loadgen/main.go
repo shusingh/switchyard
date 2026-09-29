@@ -242,8 +242,8 @@ func reportCommand(args []string, out io.Writer) error {
 	}
 	// Build the table in memory, where writes cannot fail, and write it once.
 	var b strings.Builder
-	fmt.Fprintf(&b, "| Run | Requests | Failed | Goodput (TTFT <= %s) | TTFT p50 | TTFT p90 | TTFT p99 | TPOT p50 | Output tok/s | Cache hit rate |\n", *slo)
-	b.WriteString("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n")
+	fmt.Fprintf(&b, "| Run | Requests | Failed | Goodput (TTFT <= %s) | TTFT p50 | TTFT p90 | TTFT p99 | TPOT p50 | Output tok/s | Cache hit rate | Router-believed hit rate | TTFT prediction error p50 |\n", *slo)
+	b.WriteString("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n")
 	for _, path := range fs.Args() {
 		records, err := loadgen.ReadRecords(path)
 		if err != nil {
@@ -258,10 +258,17 @@ func reportCommand(args []string, out io.Writer) error {
 				hit = fmt.Sprintf("%.1f%%", 100**meta.HitRate)
 			}
 		}
-		fmt.Fprintf(&b, "| %s | %d | %d | %.1f%% | %s | %s | %s | %s | %.0f | %s |\n",
+		believed, predErr := "n/a", "n/a"
+		if s.BelievedHitRate > 0 {
+			believed = fmt.Sprintf("%.1f%%", 100*s.BelievedHitRate)
+		}
+		if s.PredictionError.P50 > 0 {
+			predErr = fmtMS(s.PredictionError.P50)
+		}
+		fmt.Fprintf(&b, "| %s | %d | %d | %.1f%% | %s | %s | %s | %s | %.0f | %s | %s | %s |\n",
 			label, s.Requests, s.Failed, 100*s.Goodput,
 			fmtMS(s.TTFT.P50), fmtMS(s.TTFT.P90), fmtMS(s.TTFT.P99), fmtMS(s.TPOT.P50),
-			s.OutputTokensPerSec, hit)
+			s.OutputTokensPerSec, hit, believed, predErr)
 	}
 	_, err := io.WriteString(out, b.String())
 	return err
