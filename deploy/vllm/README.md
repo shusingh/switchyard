@@ -28,7 +28,8 @@ Recorded on 2026-09-28. Benchmark results must state this configuration.
 | KV cache | 1 GiB per replica (`--kv-cache-memory-bytes 1G`) |
 | KV capacity | 2,340 blocks of 16 tokens = **37,440 tokens per replica**, 149,760 in the pool |
 | Max context | 16,384 tokens (`--max-model-len`) |
-| Prefix caching | Enabled; block size 16 |
+| Prefix caching | Enabled; block size 16; hash algorithm `sha256_cbor` (reproducible outside Python; the default `sha256` hashes a pickle) |
+| KV events | Published over ZeroMQ, topic `kv-events`, replica N on port 5601+N |
 | GPU memory in use | 23.9 of 24.5 GB with all four replicas up (about 3.1 GB is the Windows desktop) |
 
 The exact command line per replica:
@@ -39,7 +40,7 @@ vllm serve Qwen/Qwen2.5-1.5B-Instruct \
   --host 0.0.0.0 --port 8001 \
   --kv-cache-memory-bytes 1G \
   --max-model-len 16384 \
-  --enable-prefix-caching
+  --enable-prefix-caching   --prefix-caching-hash-algo sha256_cbor   --kv-events-config '{"enable_kv_cache_events": true, "publisher": "zmq", "endpoint": "tcp://*:5601", "topic": "kv-events"}'
 ```
 
 ## Verified behavior

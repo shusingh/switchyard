@@ -18,6 +18,7 @@ MODEL="${MODEL:-Qwen/Qwen2.5-1.5B-Instruct}"
 REPLICAS="${REPLICAS:-4}"
 BASE_PORT="${BASE_PORT:-8001}"
 KV_CACHE_BYTES="${KV_CACHE_BYTES:-1G}"
+KV_EVENTS_BASE_PORT="${KV_EVENTS_BASE_PORT:-5601}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-16384}"
 STARTUP_TIMEOUT_S="${STARTUP_TIMEOUT_S:-600}"
 RUN_DIR="${RUN_DIR:-$HOME/.switchyard/vllm}"
@@ -65,12 +66,17 @@ start() {
     echo "starting replica $i on port $port"
     # setsid detaches the server from this shell's session, so it keeps running
     # after the invoking wsl.exe process exits.
+    # Each replica publishes its KV cache events (blocks stored and removed)
+    # over ZeroMQ on its own port, for the router's precise mode.
+    local events_port=$((KV_EVENTS_BASE_PORT + i))
     setsid nohup vllm serve "$MODEL" \
       --host 0.0.0.0 \
       --port "$port" \
       --kv-cache-memory-bytes "$KV_CACHE_BYTES" \
       --max-model-len "$MAX_MODEL_LEN" \
       --enable-prefix-caching \
+      --prefix-caching-hash-algo sha256_cbor \
+      --kv-events-config "{\"enable_kv_cache_events\": true, \"publisher\": \"zmq\", \"endpoint\": \"tcp://*:${events_port}\", \"topic\": \"kv-events\"}" \
       >"$RUN_DIR/$port.log" 2>&1 </dev/null &
     local pid=$!
     echo "$pid" >"$RUN_DIR/$port.pid"
