@@ -32,7 +32,28 @@ var (
 	// ErrStreamIdle means a streaming response produced no event within the
 	// idle timeout and was aborted.
 	ErrStreamIdle = errors.New("upstream stream idle timeout")
+
+	// ErrRetryableStatus means the backend answered 502, 503, or 504 and
+	// ForwardOptions.HoldRetryableStatus was set, so nothing was written to
+	// the client and the request may be retried elsewhere.
+	ErrRetryableStatus = errors.New("upstream returned a retryable status")
 )
+
+// ForwardOptions adjusts one Forward call.
+type ForwardOptions struct {
+	// OnFirstToken, if not nil, is called once, as soon as the first event
+	// carrying generated text arrives on a streaming response.
+	OnFirstToken func()
+	// HoldRetryableStatus makes a 502, 503, or 504 response return
+	// ErrRetryableStatus instead of being relayed, so the caller can retry.
+	HoldRetryableStatus bool
+}
+
+// IsRetryableStatus reports whether a backend status indicates a transient
+// failure worth retrying on another backend.
+func IsRetryableStatus(status int) bool {
+	return status == http.StatusBadGateway || status == http.StatusServiceUnavailable || status == http.StatusGatewayTimeout
+}
 
 // hopByHopHeaders are connection-scoped and must not be forwarded
 // (RFC 9110 section 7.6.1). Keys are in canonical form.
@@ -105,12 +126,9 @@ type Result struct {
 // w. The upstream request is bound to r's context, so a client disconnect
 // cancels the backend's work.
 //
-// onFirstToken, if not nil, is called once, as soon as the first event
-// carrying generated text arrives on a streaming response.
-//
 // When Forward returns an error, Result.HeaderWritten tells the caller whether
 // it can still write an error response.
-func (p *Proxy) Forward(w http.ResponseWriter, r *http.Request, b *backend.Backend, body []byte, onFirstToken func()) (Result, error) {
+func (p *Proxy) Forward(w http.ResponseWriter, r *http.Request, b *backend.Backend, body []byte, opts ForwardOptions) (Result, error) {
 	start := time.Now()
 	ctx, cancel := context.WithCancelCause(r.Context())
 	defer cancel(nil)
@@ -139,6 +157,12 @@ func (p *Proxy) Forward(w http.ResponseWriter, r *http.Request, b *backend.Backe
 	defer resp.Body.Close()
 
 	res := Result{Status: resp.StatusCode, FirstByte: time.Since(start), Streamed: isEventStream(resp.Header)}
+	if opts.HoldRetryableStatus && IsRetryableStatus(resp.StatusCode) {
+		// Drain a little so the connection can be reused; the body of an
+		// error response is small.
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
+		return res, fmt.Errorf("%w: %s: %d", ErrRetryableStatus, b.ID(), resp.StatusCode)
+	}
 	copyHeaders(w.Header(), resp.Header)
 	if res.Streamed {
 		// The body length is unknown while streaming.
@@ -155,7 +179,7 @@ func (p *Proxy) Forward(w http.ResponseWriter, r *http.Request, b *backend.Backe
 		}
 		return res, nil
 	}
-	err = p.relayEvents(ctx, cancel, w, resp.Body, start, onFirstToken, &res)
+	err = p.relayEvents(ctx, cancel, w, resp.Body, start, opts.OnFirstToken, &res)
 	return res, err
 }
 

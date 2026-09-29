@@ -90,7 +90,10 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	pool, err := backend.NewPool(cfg.Backends)
+	pool, err := backend.NewPool(cfg.Backends, backend.BreakerConfig{
+		FailureThreshold: cfg.Proxy.BreakerFailures,
+		Cooldown:         cfg.Proxy.BreakerCooldown,
+	})
 	if err != nil {
 		return err
 	}
@@ -130,6 +133,8 @@ func run() error {
 		ExplainHeaders:    cfg.Server.ExplainHeaders,
 		Admission:         admit,
 		TrustTenantHeader: cfg.Admission.TrustTenantHeader,
+		MaxRetries:        cfg.Proxy.MaxRetries,
+		RetryBudgetRatio:  cfg.Proxy.RetryBudgetRatio,
 	})
 	httpServer := &http.Server{
 		Addr:              cfg.Server.Listen,

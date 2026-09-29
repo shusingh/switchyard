@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -46,6 +47,10 @@ type harnessOptions struct {
 	skipHealthCheck bool
 	explainHeaders  bool
 	admission       *admission.Controller
+	maxRetries      int
+	breaker         backend.BreakerConfig
+	// extraBackends are URLs of hand-built servers added after the engines.
+	extraBackends []string
 }
 
 func newHarness(t *testing.T, opts harnessOptions) *harness {
@@ -60,7 +65,10 @@ func newHarness(t *testing.T, opts harnessOptions) *harness {
 		h.engines = append(h.engines, srv.Engine)
 		backends = append(backends, config.Backend{ID: string(rune('a' + i)), URL: srv.URL})
 	}
-	pool, err := backend.NewPool(backends)
+	for _, u := range opts.extraBackends {
+		backends = append(backends, config.Backend{ID: "extra-" + strconv.Itoa(len(backends)), URL: u})
+	}
+	pool, err := backend.NewPool(backends, opts.breaker)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -89,8 +97,10 @@ func newHarness(t *testing.T, opts harnessOptions) *harness {
 	router := httptest.NewServer(New(Options{
 		Pool: pool, Policy: policy, Proxy: px, Keyer: testKeyer(), Index: testIndex(len(backends)), Estimator: testEstimator(len(backends)),
 		Logger: slog.New(slog.DiscardHandler), MaxRequestBytes: opts.maxRequestBytes,
-		ExplainHeaders: opts.explainHeaders,
-		Admission:      admissionOrDefault(t, opts.admission),
+		ExplainHeaders:   opts.explainHeaders,
+		Admission:        admissionOrDefault(t, opts.admission),
+		MaxRetries:       opts.maxRetries,
+		RetryBudgetRatio: 1,
 	}).Handler())
 	t.Cleanup(router.Close)
 
@@ -267,6 +277,69 @@ func TestTenantBudgetReturns429WithRetryAfter(t *testing.T) {
 	}
 }
 
+// failingBackend answers health checks but fails every request with status.
+func failingBackend(t *testing.T, status int) (url string, calls *atomic.Int64) {
+	t.Helper()
+	calls = &atomic.Int64{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/health" {
+			return
+		}
+		calls.Add(1)
+		http.Error(w, "backend overloaded", status)
+	}))
+	t.Cleanup(srv.Close)
+	return srv.URL, calls
+}
+
+func TestRetryOnAnotherBackendAfterRetryableStatus(t *testing.T) {
+	t.Parallel()
+	bad, calls := failingBackend(t, http.StatusServiceUnavailable)
+	h := newHarness(t, harnessOptions{engines: fastEngines(1), extraBackends: []string{bad}, maxRetries: 1})
+	// Round robin alternates between the engine and the failing backend, so
+	// half of these requests first land on the failing one.
+	for i := range 6 {
+		resp := h.post(t, context.Background(), openai.PathChatCompletions, `{"model":"sim-model","messages":[]}`)
+		_, _ = io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Errorf("request %d: status %d, want 200 after a retry", i, resp.StatusCode)
+		}
+	}
+	if calls.Load() == 0 {
+		t.Error("the failing backend was never tried; the test did not exercise a retry")
+	}
+}
+
+func TestNoRetryRelaysBackendStatus(t *testing.T) {
+	t.Parallel()
+	bad, _ := failingBackend(t, http.StatusServiceUnavailable)
+	h := newHarness(t, harnessOptions{extraBackends: []string{bad}, maxRetries: 0})
+	resp := h.post(t, context.Background(), openai.PathChatCompletions, `{"model":"sim-model","messages":[]}`)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Errorf("status = %d, want the backend's 503 relayed when retries are off", resp.StatusCode)
+	}
+}
+
+func TestBreakerTakesFailingBackendOutOfRotation(t *testing.T) {
+	t.Parallel()
+	bad, calls := failingBackend(t, http.StatusInternalServerError)
+	h := newHarness(t, harnessOptions{
+		engines:       fastEngines(1),
+		extraBackends: []string{bad},
+		breaker:       backend.BreakerConfig{FailureThreshold: 2, Cooldown: time.Hour},
+	})
+	for range 20 {
+		resp := h.post(t, context.Background(), openai.PathChatCompletions, `{"model":"sim-model","messages":[]}`)
+		_, _ = io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+	}
+	if got := calls.Load(); got != 2 {
+		t.Errorf("failing backend received %d requests, want 2: the breaker should open after 2 failures", got)
+	}
+}
+
 func TestExplainHeaders(t *testing.T) {
 	t.Parallel()
 	for _, enabled := range []bool{false, true} {
@@ -402,7 +475,7 @@ func TestUnreachableBackendReturnsBadGateway(t *testing.T) {
 	// A backend that passed its health check and then died.
 	engine := sim.NewEngine(sim.Options{Model: testModel})
 	dead := httptest.NewServer(engine.Handler())
-	pool, _ := backend.NewPool([]config.Backend{{ID: "a", URL: dead.URL}})
+	pool, _ := backend.NewPool([]config.Backend{{ID: "a", URL: dead.URL}}, backend.BreakerConfig{})
 	checker := backend.NewHealthChecker(pool, config.Health{Path: "/health", Interval: time.Hour, Timeout: time.Second, UnhealthyThreshold: 1, HealthyThreshold: 1}, slog.New(slog.DiscardHandler))
 	checker.CheckAll(context.Background())
 	checker.CloseIdleConnections()

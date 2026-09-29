@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/url"
 	"sync/atomic"
+	"time"
 
 	"github.com/shusingh/switchyard/internal/config"
 )
@@ -17,6 +18,7 @@ type Backend struct {
 	index  int
 	base   *url.URL
 	apiKey string
+	br     breaker
 
 	healthy    atomic.Bool
 	generation atomic.Uint64
@@ -44,8 +46,21 @@ func (b *Backend) APIKey() string { return b.apiKey }
 // elsewhere, such as the prefix index, is kept in slices indexed by it.
 func (b *Backend) Index() int { return b.index }
 
-// Healthy reports whether the backend is currently eligible for traffic.
+// Healthy reports whether the backend passes its health checks.
 func (b *Backend) Healthy() bool { return b.healthy.Load() }
+
+// Available reports whether the backend may receive traffic: it is healthy
+// and its circuit breaker is not open.
+func (b *Backend) Available() bool { return b.Healthy() && b.br.peek() }
+
+// Acquire claims permission to send one request to the backend. It returns
+// false if the circuit breaker is open, or half-open with its single trial
+// request already out. After a successful Acquire the caller must call
+// Report exactly once.
+func (b *Backend) Acquire() bool { return b.br.allow() }
+
+// Report records the outcome of a request sent after Acquire.
+func (b *Backend) Report(o Outcome) { b.br.record(o) }
 
 // Generation increases every time the backend becomes healthy. State derived
 // from an earlier generation, such as cached-prefix beliefs, is stale because
@@ -77,15 +92,19 @@ type Pool struct {
 }
 
 // NewPool builds a pool from configuration. Backends start unhealthy until
-// their first successful health check.
-func NewPool(cfgs []config.Backend) (*Pool, error) {
+// their first successful health check. A zero BreakerConfig disables circuit
+// breaking.
+func NewPool(cfgs []config.Backend, breakerCfg BreakerConfig) (*Pool, error) {
 	p := &Pool{backends: make([]*Backend, 0, len(cfgs))}
 	for i, c := range cfgs {
 		u, err := url.Parse(c.URL)
 		if err != nil {
 			return nil, fmt.Errorf("backend %s: parse url: %w", c.ID, err)
 		}
-		p.backends = append(p.backends, &Backend{id: c.ID, index: i, base: u, apiKey: c.APIKey})
+		p.backends = append(p.backends, &Backend{
+			id: c.ID, index: i, base: u, apiKey: c.APIKey,
+			br: breaker{cfg: breakerCfg, now: time.Now},
+		})
 	}
 	return p, nil
 }
@@ -94,12 +113,11 @@ func NewPool(cfgs []config.Backend) (*Pool, error) {
 // and must not be modified.
 func (p *Pool) Backends() []*Backend { return p.backends }
 
-// AppendHealthy appends the currently healthy backends to dst and returns the
-// extended slice. Callers on the request path pass a reused buffer to avoid
-// allocating.
-func (p *Pool) AppendHealthy(dst []*Backend) []*Backend {
+// AppendAvailable appends the backends that may currently receive traffic
+// to dst and returns the extended slice.
+func (p *Pool) AppendAvailable(dst []*Backend) []*Backend {
 	for _, b := range p.backends {
-		if b.Healthy() {
+		if b.Available() {
 			dst = append(dst, b)
 		}
 	}

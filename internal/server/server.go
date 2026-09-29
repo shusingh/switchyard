@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"math"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -52,6 +53,11 @@ type Options struct {
 	// TrustTenantHeader identifies tenants by the X-Tenant-ID header instead
 	// of the bearer token.
 	TrustTenantHeader bool
+	// MaxRetries is how many times a request that failed transiently, before
+	// anything reached the client, may be retried on another backend.
+	MaxRetries int
+	// RetryBudgetRatio caps retries as a fraction of requests.
+	RetryBudgetRatio float64
 }
 
 // Server serves the HTTP API. It is safe for concurrent use.
@@ -67,6 +73,8 @@ type Server struct {
 	explainHeaders  bool
 	admission       *admission.Controller
 	trustTenantHdr  bool
+	maxRetries      int
+	retries         *retryBudget
 }
 
 // New returns a Server with the given dependencies.
@@ -83,6 +91,8 @@ func New(opts Options) *Server {
 		explainHeaders:  opts.ExplainHeaders,
 		admission:       opts.Admission,
 		trustTenantHdr:  opts.TrustTenantHeader,
+		maxRetries:      opts.MaxRetries,
+		retries:         newRetryBudget(opts.RetryBudgetRatio),
 	}
 }
 
@@ -120,49 +130,37 @@ func (s *Server) handleInference(w http.ResponseWriter, r *http.Request) {
 	// Route after admission, so the decision reflects load when the request
 	// actually runs rather than when it arrived.
 	route := s.newRoute(&parsed, promptTokens)
-	b, ok := s.pick(w, route)
+	a, ok := s.forward(w, r, body, &parsed, route)
 	if !ok {
 		grant.Release(0)
+		openai.WriteError(w, http.StatusServiceUnavailable, openai.ErrTypeUnavailable, "no healthy backend available")
 		s.logger.Warn("no healthy backend",
 			slog.String("request_id", RequestID(r.Context())),
 			slog.String("model", route.Model))
 		return
 	}
-	// Record the belief before forwarding, so concurrent requests with the
-	// same prefix see it immediately.
-	s.index.Insert(b.Index(), b.Generation(), parsed.Hashes)
-
-	uncached := s.estimator.UncachedTokens(route.PromptTokens, route.MatchedOn(b))
-	if route.PredictedTTFT == 0 {
-		// Cache-blind policies do not predict; predict anyway so every policy
-		// reports the same prediction-error measure.
-		route.PredictedTTFT = s.estimator.TTFT(b, uncached)
-	}
-	if s.explainHeaders {
-		explain(w.Header(), b, route)
-	}
-	ticket := b.Admit(uncached)
-	res, err := s.proxy.Forward(w, r, b, body, ticket.FirstToken)
-	ticket.Done()
-	s.learn(b, ticket, &parsed, &res)
 	actualCost := -1.0 // keep the estimate unless usage says otherwise
-	if res.Usage != nil {
-		actualCost = float64(res.Usage.PromptTokens + res.Usage.CompletionTokens)
+	if a.res.Usage != nil {
+		actualCost = float64(a.res.Usage.PromptTokens + a.res.Usage.CompletionTokens)
 	}
 	grant.Release(actualCost)
 
-	status := res.Status
+	status := a.res.Status
 	switch {
-	case err == nil:
+	case a.err == nil:
 	case r.Context().Err() != nil:
 		status = statusClientClosedRequest
-	case !res.HeaderWritten:
+	case !a.res.HeaderWritten:
 		status = http.StatusBadGateway
+		if errors.Is(a.err, proxy.ErrRetryableStatus) {
+			status = a.res.Status // retries exhausted: report what the backend said
+		}
 		openai.WriteError(w, status, openai.ErrTypeServer, "backend request failed")
 	}
 	s.logRequest(r, requestLog{
 		start: start, queueWait: queueWait, tenant: grant.Tenant(), bodyBytes: len(body),
-		parsed: &parsed, route: route, backend: b, uncached: uncached, status: status, res: &res, err: err,
+		parsed: &parsed, route: route, backend: a.backend, uncached: a.uncached, retries: a.retries,
+		status: status, res: &a.res, err: a.err,
 	})
 }
 
@@ -195,6 +193,91 @@ func (s *Server) readBody(w http.ResponseWriter, r *http.Request) ([]byte, bool)
 	}
 	openai.WriteError(w, http.StatusBadRequest, openai.ErrTypeInvalidRequest, "could not read request body")
 	return nil, false
+}
+
+// attempt is the outcome of forwarding a request, after any retries.
+type attempt struct {
+	backend  *backend.Backend
+	uncached int64
+	res      proxy.Result
+	err      error
+	retries  int
+}
+
+// forward sends the request to the best available backend. If that fails
+// transiently before anything reaches the client, it retries on a different
+// backend, within the retry limit and budget. It returns false only if no
+// backend was available for the first attempt; the caller answers 503.
+func (s *Server) forward(w http.ResponseWriter, r *http.Request, body []byte, parsed *prefix.Request, route *scheduler.Request) (attempt, bool) {
+	s.retries.deposit()
+	var a attempt
+	var tried []*backend.Backend
+	for {
+		b, ok := s.pick(route, tried)
+		if !ok {
+			return a, a.backend != nil // report the last failure, if any
+		}
+		if !b.Acquire() {
+			// The breaker opened, or its one trial slot was taken, since the
+			// candidates were listed.
+			tried = append(tried, b)
+			continue
+		}
+		// Record the belief before forwarding, so concurrent requests with
+		// the same prefix see it immediately.
+		s.index.Insert(b.Index(), b.Generation(), parsed.Hashes)
+		uncached := s.estimator.UncachedTokens(route.PromptTokens, route.MatchedOn(b))
+		if route.PredictedTTFT == 0 {
+			// Cache-blind policies do not predict; predict anyway so every
+			// policy reports the same prediction-error measure.
+			route.PredictedTTFT = s.estimator.TTFT(b, uncached)
+		}
+		if s.explainHeaders {
+			explain(w.Header(), b, route)
+		}
+
+		ticket := b.Admit(uncached)
+		res, err := s.proxy.Forward(w, r, b, body, proxy.ForwardOptions{
+			OnFirstToken:        ticket.FirstToken,
+			HoldRetryableStatus: a.retries < s.maxRetries && s.retries.available(),
+		})
+		ticket.Done()
+		b.Report(outcome(r, res, err))
+		s.learn(b, ticket, parsed, &res)
+		a = attempt{backend: b, uncached: uncached, res: res, err: err, retries: a.retries}
+
+		if !retryable(r, &a) || a.retries >= s.maxRetries || !s.retries.withdraw() {
+			return a, true
+		}
+		a.retries++
+		tried = append(tried, b)
+		route.PredictedTTFT = 0
+	}
+}
+
+// retryable reports whether an attempt failed in a way that another backend
+// might not, before anything reached the client.
+func retryable(r *http.Request, a *attempt) bool {
+	return r.Context().Err() == nil && !a.res.HeaderWritten &&
+		(errors.Is(a.err, proxy.ErrUpstreamUnavailable) || errors.Is(a.err, proxy.ErrRetryableStatus))
+}
+
+// outcome classifies an attempt for the backend's circuit breaker.
+func outcome(r *http.Request, res proxy.Result, err error) backend.Outcome {
+	switch {
+	case r.Context().Err() != nil:
+		return backend.OutcomeAbandoned
+	case err == nil && res.Status >= 500:
+		return backend.OutcomeFailure
+	case err == nil:
+		return backend.OutcomeSuccess
+	case errors.Is(err, proxy.ErrUpstreamUnavailable), errors.Is(err, proxy.ErrRetryableStatus), errors.Is(err, proxy.ErrStreamIdle):
+		return backend.OutcomeFailure
+	default:
+		// Other errors, such as a failed write to the client, say nothing
+		// about the backend.
+		return backend.OutcomeAbandoned
+	}
 }
 
 // defaultOutputEstimate is the output charged to a request that sets no
@@ -266,6 +349,7 @@ func (s *Server) learn(b *backend.Backend, ticket *backend.Ticket, parsed *prefi
 
 // requestLog gathers what the access log line reports about one request.
 type requestLog struct {
+	retries   int
 	start     time.Time
 	queueWait time.Duration
 	tenant    string
@@ -300,6 +384,7 @@ func (s *Server) logRequest(r *http.Request, l requestLog) {
 		slog.Int64("response_bytes", l.res.BytesWritten),
 		slog.Duration("duration", time.Since(l.start)),
 		slog.Duration("queue_wait", l.queueWait),
+		slog.Int("retries", l.retries),
 		slog.Duration("first_byte", l.res.FirstByte),
 	}
 	if l.res.Streamed {
@@ -321,26 +406,25 @@ func (s *Server) logRequest(r *http.Request, l requestLog) {
 // handleModels proxies the model list from one healthy backend. Every
 // backend serves the same model, so any of them can answer.
 func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
-	b, ok := s.pick(w, &scheduler.Request{})
+	b, ok := s.pick(&scheduler.Request{}, nil)
 	if !ok {
+		openai.WriteError(w, http.StatusServiceUnavailable, openai.ErrTypeUnavailable, "no healthy backend available")
 		return
 	}
 	ticket := b.Admit(0)
 	defer ticket.Done()
-	if res, err := s.proxy.Forward(w, r, b, nil, nil); err != nil && !res.HeaderWritten && r.Context().Err() == nil {
+	if res, err := s.proxy.Forward(w, r, b, nil, proxy.ForwardOptions{}); err != nil && !res.HeaderWritten && r.Context().Err() == nil {
 		openai.WriteError(w, http.StatusBadGateway, openai.ErrTypeServer, "backend request failed")
 	}
 }
 
-// pick chooses a healthy backend, or writes a 503 and returns false.
-func (s *Server) pick(w http.ResponseWriter, req *scheduler.Request) (*backend.Backend, bool) {
-	candidates := s.pool.AppendHealthy(make([]*backend.Backend, 0, 8))
+// pick chooses an available backend not in exclude, and reports false if
+// there is none.
+func (s *Server) pick(req *scheduler.Request, exclude []*backend.Backend) (*backend.Backend, bool) {
+	candidates := s.pool.AppendAvailable(make([]*backend.Backend, 0, 8))
+	candidates = slices.DeleteFunc(candidates, func(b *backend.Backend) bool { return slices.Contains(exclude, b) })
 	b, err := s.policy.Pick(req, candidates)
-	if err != nil {
-		openai.WriteError(w, http.StatusServiceUnavailable, openai.ErrTypeUnavailable, "no healthy backend available")
-		return nil, false
-	}
-	return b, true
+	return b, err == nil
 }
 
 // handleLiveness reports that the process is up. It never checks backends:

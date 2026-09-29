@@ -25,7 +25,7 @@ func testConfig() config.Proxy {
 
 func backendFor(t *testing.T, url string) *backend.Backend {
 	t.Helper()
-	p, err := backend.NewPool([]config.Backend{{ID: "b0", URL: url}})
+	p, err := backend.NewPool([]config.Backend{{ID: "b0", URL: url}}, backend.BreakerConfig{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -44,7 +44,7 @@ func frontServer(t *testing.T, p *Proxy, target *backend.Backend) (*httptest.Ser
 	outcomes := make(chan forwardOutcome, 1)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
-		res, err := p.Forward(w, r, target, body, nil)
+		res, err := p.Forward(w, r, target, body, ForwardOptions{HoldRetryableStatus: r.Header.Get("X-Hold") != ""})
 		outcomes <- forwardOutcome{res, err}
 	}))
 	t.Cleanup(srv.Close)
@@ -199,6 +199,35 @@ func TestForwardUnreachableBackend(t *testing.T) {
 	}
 	if out.res.HeaderWritten {
 		t.Error("Result.HeaderWritten = true, want false so the caller can send an error")
+	}
+}
+
+func TestForwardHoldsRetryableStatus(t *testing.T) {
+	t.Parallel()
+	be := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "overloaded", http.StatusServiceUnavailable)
+	}))
+	t.Cleanup(be.Close)
+	front, outcomes := frontServer(t, New(testConfig()), backendFor(t, be.URL))
+
+	for _, hold := range []bool{false, true} {
+		req, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, front.URL+"/v1/chat/completions", strings.NewReader(`{"model":"m"}`))
+		if hold {
+			req.Header.Set("X-Hold", "1")
+		}
+		resp, err := http.DefaultTransport.RoundTrip(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		out := <-outcomes
+		if hold {
+			if !errors.Is(out.err, ErrRetryableStatus) || out.res.HeaderWritten {
+				t.Errorf("held 503: err=%v headerWritten=%v, want ErrRetryableStatus and nothing written", out.err, out.res.HeaderWritten)
+			}
+		} else if out.err != nil || resp.StatusCode != http.StatusServiceUnavailable {
+			t.Errorf("relayed 503: err=%v status=%d, want the 503 relayed without error", out.err, resp.StatusCode)
+		}
 	}
 }
 

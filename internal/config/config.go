@@ -89,6 +89,19 @@ type Proxy struct {
 	// legitimate, hung ones are not.
 	StreamIdleTimeout   time.Duration `yaml:"stream_idle_timeout"`
 	MaxIdleConnsPerHost int           `yaml:"max_idle_conns_per_host"`
+	// MaxRetries is how many times a request that failed transiently
+	// (connection failure or 502, 503, 504) before anything reached the
+	// client may be retried on another backend.
+	MaxRetries int `yaml:"max_retries"`
+	// RetryBudgetRatio caps retries as a fraction of requests, so failures
+	// do not multiply the load on the backends that remain.
+	RetryBudgetRatio float64 `yaml:"retry_budget_ratio"`
+	// BreakerFailures is the number of consecutive failed requests that
+	// takes a backend out of rotation; 0 disables circuit breaking.
+	BreakerFailures int `yaml:"breaker_failures"`
+	// BreakerCooldown is how long a backend stays out of rotation before a
+	// single trial request is let through.
+	BreakerCooldown time.Duration `yaml:"breaker_cooldown"`
 }
 
 // Routing selects the routing policy and configures prefix tracking. See
@@ -235,6 +248,10 @@ func (c *Config) ApplyDefaults() {
 	setDefault(&c.Proxy.ResponseHeaderTimeout, 10*time.Minute)
 	setDefault(&c.Proxy.StreamIdleTimeout, 60*time.Second)
 	setDefault(&c.Proxy.MaxIdleConnsPerHost, 256)
+	setDefault(&c.Proxy.MaxRetries, 1)
+	setDefault(&c.Proxy.RetryBudgetRatio, 0.1)
+	setDefault(&c.Proxy.BreakerFailures, 5)
+	setDefault(&c.Proxy.BreakerCooldown, 30*time.Second)
 
 	setDefault(&c.Routing.Policy, "round_robin")
 	setDefault(&c.Routing.BlockBytes, 128)
@@ -330,6 +347,9 @@ func (c *Config) Validate() error {
 	}
 	if c.Routing.KVCapacityTokens < 1 {
 		fail("routing.kv_capacity_tokens", "must be at least 1, got %d", c.Routing.KVCapacityTokens)
+	}
+	if c.Proxy.MaxRetries < 0 || c.Proxy.RetryBudgetRatio < 0 || c.Proxy.BreakerFailures < 0 || c.Proxy.BreakerCooldown < 0 {
+		fail("proxy", "max_retries, retry_budget_ratio, breaker_failures, and breaker_cooldown must not be negative")
 	}
 	if c.Admission.MaxInFlight < 1 {
 		fail("admission.max_in_flight", "must be at least 1, got %d", c.Admission.MaxInFlight)

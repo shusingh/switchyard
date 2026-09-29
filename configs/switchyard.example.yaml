@@ -39,6 +39,15 @@ proxy:
   # A stream that produces no event for this long is aborted.
   stream_idle_timeout: 60s
   max_idle_conns_per_host: 256
+  # Retry a request on another backend when it failed transiently
+  # (connection failure, 502, 503, 504) before anything reached the client.
+  max_retries: 1
+  # Retries may not exceed this fraction of requests.
+  retry_budget_ratio: 0.1
+  # Consecutive failed requests that take a backend out of rotation, and how
+  # long before a single trial request is let through. 0 disables.
+  breaker_failures: 5
+  breaker_cooldown: 30s
 
 routing:
   # One of: estimated_ttft, least_loaded, p2c, prefix_affinity, random,
@@ -73,3 +82,29 @@ routing:
 log:
   # One of: debug, info, warn, error.
   level: info
+
+# Tenant budgets and fair queuing (docs/engineering/design.md section 10).
+admission:
+  # Concurrently running requests across all tenants; beyond this, requests
+  # wait in per-tenant queues served fairly by weight.
+  max_in_flight: 512
+  queue_timeout: 30s
+  # Fair-queuing credit per round, times a tenant's weight; near a typical
+  # request's cost in tokens.
+  quantum_tokens: 4096
+  # Identify tenants by X-Tenant-ID instead of the bearer token. Enable only
+  # behind a gateway that sets the header itself.
+  trust_tenant_header: false
+  # Requests that match no tenant. tokens_per_second 0 means no budget.
+  default_tenant:
+    name: default
+    weight: 1
+    max_queued: 256
+  tenants:
+    - name: research
+      api_keys: ["sk-research-example"]
+      weight: 2
+      # Sustained budget in estimated tokens; burst defaults to 10 seconds'
+      # worth.
+      tokens_per_second: 50000
+      max_queued: 128

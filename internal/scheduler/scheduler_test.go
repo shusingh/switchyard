@@ -16,7 +16,7 @@ func newCandidates(t *testing.T, n int) []*backend.Backend {
 	for i := range n {
 		cfgs[i] = config.Backend{ID: fmt.Sprintf("b%d", i), URL: fmt.Sprintf("http://localhost:%d", 8001+i)}
 	}
-	p, err := backend.NewPool(cfgs)
+	p, err := backend.NewPool(cfgs, backend.BreakerConfig{})
 	if err != nil {
 		t.Fatal(err)
 	}

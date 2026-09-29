@@ -37,7 +37,7 @@ func newTestPool(t *testing.T, urls ...string) *Pool {
 	for i, u := range urls {
 		cfgs[i] = config.Backend{ID: string(rune('a' + i)), URL: u}
 	}
-	p, err := NewPool(cfgs)
+	p, err := NewPool(cfgs, BreakerConfig{})
 	if err != nil {
 		t.Fatalf("NewPool() error = %v", err)
 	}
@@ -60,8 +60,8 @@ func TestNewPoolStartsUnhealthy(t *testing.T) {
 	if p.AnyHealthy() {
 		t.Error("AnyHealthy() = true before any health check, want false")
 	}
-	if got := len(p.AppendHealthy(nil)); got != 0 {
-		t.Errorf("AppendHealthy() returned %d backends, want 0", got)
+	if got := len(p.AppendAvailable(nil)); got != 0 {
+		t.Errorf("AppendAvailable() returned %d backends, want 0", got)
 	}
 }
 
