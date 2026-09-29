@@ -105,9 +105,12 @@ type Result struct {
 // w. The upstream request is bound to r's context, so a client disconnect
 // cancels the backend's work.
 //
+// onFirstToken, if not nil, is called once, as soon as the first event
+// carrying generated text arrives on a streaming response.
+//
 // When Forward returns an error, Result.HeaderWritten tells the caller whether
 // it can still write an error response.
-func (p *Proxy) Forward(w http.ResponseWriter, r *http.Request, b *backend.Backend, body []byte) (Result, error) {
+func (p *Proxy) Forward(w http.ResponseWriter, r *http.Request, b *backend.Backend, body []byte, onFirstToken func()) (Result, error) {
 	start := time.Now()
 	ctx, cancel := context.WithCancelCause(r.Context())
 	defer cancel(nil)
@@ -146,13 +149,13 @@ func (p *Proxy) Forward(w http.ResponseWriter, r *http.Request, b *backend.Backe
 		}
 		return res, nil
 	}
-	err = p.relayEvents(ctx, cancel, w, resp.Body, start, &res)
+	err = p.relayEvents(ctx, cancel, w, resp.Body, start, onFirstToken, &res)
 	return res, err
 }
 
 // relayEvents copies events from body to w, flushing after each one. It
 // aborts the upstream request if no event arrives within the idle timeout.
-func (p *Proxy) relayEvents(ctx context.Context, cancel context.CancelCauseFunc, w http.ResponseWriter, body io.Reader, start time.Time, res *Result) error {
+func (p *Proxy) relayEvents(ctx context.Context, cancel context.CancelCauseFunc, w http.ResponseWriter, body io.Reader, start time.Time, onFirstToken func(), res *Result) error {
 	rc := http.NewResponseController(w)
 	idle := time.AfterFunc(p.streamIdleTimeout, func() { cancel(ErrStreamIdle) })
 	defer idle.Stop()
@@ -162,7 +165,7 @@ func (p *Proxy) relayEvents(ctx context.Context, cancel context.CancelCauseFunc,
 		ev, readErr := events.Next()
 		idle.Reset(p.streamIdleTimeout)
 		if len(ev) > 0 {
-			if err := p.relayEvent(rc, w, ev, start, res); err != nil {
+			if err := p.relayEvent(rc, w, ev, start, onFirstToken, res); err != nil {
 				return err
 			}
 		}
@@ -179,10 +182,13 @@ func (p *Proxy) relayEvents(ctx context.Context, cancel context.CancelCauseFunc,
 	}
 }
 
-func (p *Proxy) relayEvent(rc *http.ResponseController, w io.Writer, ev []byte, start time.Time, res *Result) error {
+func (p *Proxy) relayEvent(rc *http.ResponseController, w io.Writer, ev []byte, start time.Time, onFirstToken func(), res *Result) error {
 	data := openai.EventData(ev)
 	if res.FirstToken == 0 && openai.ChunkHasContent(data) {
 		res.FirstToken = time.Since(start)
+		if onFirstToken != nil {
+			onFirstToken()
+		}
 	}
 	if u, ok := openai.ChunkUsage(data); ok {
 		res.Usage = &u

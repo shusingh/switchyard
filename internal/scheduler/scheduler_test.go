@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/shusingh/switchyard/internal/backend"
 	"github.com/shusingh/switchyard/internal/config"
@@ -25,7 +26,7 @@ func newCandidates(t *testing.T, n int) []*backend.Backend {
 func TestNew(t *testing.T) {
 	t.Parallel()
 	for _, name := range Names() {
-		p, err := New(name)
+		p, err := New(name, testOptions())
 		if err != nil {
 			t.Errorf("New(%q) error = %v", name, err)
 			continue
@@ -34,7 +35,7 @@ func TestNew(t *testing.T) {
 			t.Errorf("New(%q).Name() = %q", name, p.Name())
 		}
 	}
-	if _, err := New("nonexistent"); err == nil {
+	if _, err := New("nonexistent", testOptions()); err == nil {
 		t.Error(`New("nonexistent") error = nil, want an error`)
 	}
 }
@@ -42,7 +43,7 @@ func TestNew(t *testing.T) {
 func TestPoliciesRejectEmptyCandidates(t *testing.T) {
 	t.Parallel()
 	for _, name := range Names() {
-		p, _ := New(name)
+		p, _ := New(name, testOptions())
 		if _, err := p.Pick(&Request{}, nil); !errors.Is(err, ErrNoCandidates) {
 			t.Errorf("%s.Pick(nil) error = %v, want %v", name, err, ErrNoCandidates)
 		}
@@ -52,7 +53,7 @@ func TestPoliciesRejectEmptyCandidates(t *testing.T) {
 func TestRoundRobinIsEven(t *testing.T) {
 	t.Parallel()
 	candidates := newCandidates(t, 4)
-	p, _ := New(PolicyRoundRobin)
+	p, _ := New(PolicyRoundRobin, testOptions())
 	counts := map[string]int{}
 	for range 400 {
 		b, err := p.Pick(&Request{}, candidates)
@@ -71,16 +72,16 @@ func TestRoundRobinIsEven(t *testing.T) {
 func TestLeastLoadedPicksIdlestAndSpreadsTies(t *testing.T) {
 	t.Parallel()
 	candidates := newCandidates(t, 3)
-	candidates[0].BeginRequest()
-	candidates[0].BeginRequest()
-	candidates[1].BeginRequest()
-	p, _ := New(PolicyLeastLoaded)
+	candidates[0].Admit(0)
+	candidates[0].Admit(0)
+	candidates[1].Admit(0)
+	p, _ := New(PolicyLeastLoaded, testOptions())
 	b, _ := p.Pick(&Request{}, candidates)
 	if b != candidates[2] {
 		t.Fatalf("least_loaded picked %s, want the idle backend b2", b.ID())
 	}
 
-	candidates[2].BeginRequest() // now b1 and b2 tie at one request each
+	candidates[2].Admit(0) // now b1 and b2 tie at one request each
 	seen := map[string]bool{}
 	for range 200 {
 		b, _ := p.Pick(&Request{}, candidates)
@@ -98,9 +99,9 @@ func TestP2CNeverPicksTheBusierOfTwo(t *testing.T) {
 	t.Parallel()
 	candidates := newCandidates(t, 2)
 	for range 5 {
-		candidates[0].BeginRequest()
+		candidates[0].Admit(0)
 	}
-	p, _ := New(PolicyP2C)
+	p, _ := New(PolicyP2C, testOptions())
 	for range 100 {
 		// With two candidates both are always sampled, so the idle one wins.
 		if b, _ := p.Pick(&Request{}, candidates); b != candidates[1] {
@@ -116,11 +117,11 @@ func TestP2CNeverPicksTheBusierOfTwo(t *testing.T) {
 func TestPrefixAffinity(t *testing.T) {
 	t.Parallel()
 	candidates := newCandidates(t, 3)
-	p, _ := New(PolicyPrefixAffinity)
+	p, _ := New(PolicyPrefixAffinity, testOptions())
 
 	// The longest match wins even when that backend is the busiest.
 	for range 10 {
-		candidates[1].BeginRequest()
+		candidates[1].Admit(0)
 	}
 	req := &Request{Blocks: 10, Matched: []int{2, 9, 0}}
 	if b, _ := p.Pick(req, candidates); b != candidates[1] {
@@ -146,7 +147,7 @@ func TestRandomOnlyPicksCandidates(t *testing.T) {
 	for _, b := range candidates {
 		allowed[b] = true
 	}
-	p, _ := New(PolicyRandom)
+	p, _ := New(PolicyRandom, testOptions())
 	seen := map[string]bool{}
 	for range 300 {
 		b, err := p.Pick(&Request{}, candidates)
@@ -162,5 +163,21 @@ func TestRandomOnlyPicksCandidates(t *testing.T) {
 	// 3 * (2/3)^300, effectively zero.
 	if len(seen) != len(candidates) {
 		t.Errorf("random reached %d of %d candidates in 300 picks", len(seen), len(candidates))
+	}
+}
+
+// testOptions returns options that satisfy every policy, for pools of up to
+// 16 backends.
+func testOptions() Options {
+	return Options{
+		Estimator: NewEstimator(EstimatorConfig{
+			InitialPrefillTokensPerSecond: 10000,
+			Overhead:                      10 * time.Millisecond,
+			InitialBytesPerToken:          4,
+			BlockBytes:                    64,
+		}, 16),
+		BalanceAbs: 16,
+		BalanceRel: 1.5,
+		TieEpsilon: 0.05,
 	}
 }

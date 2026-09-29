@@ -141,14 +141,31 @@ func TestHealthCheckerRunStopsOnCancel(t *testing.T) {
 	}
 }
 
-func TestInFlightAccounting(t *testing.T) {
+func TestTicketLifecycle(t *testing.T) {
 	t.Parallel()
 	b := newTestPool(t, "http://localhost:1").Backends()[0]
-	b.BeginRequest()
-	b.BeginRequest()
-	b.EndRequest()
-	if got := b.InFlight(); got != 1 {
-		t.Errorf("InFlight() = %d, want 1", got)
+
+	first := b.Admit(1000)
+	second := b.Admit(500)
+	if second.QueueTokensAtAdmit != 1000 {
+		t.Errorf("second ticket saw %d queued tokens at admission, want 1000", second.QueueTokensAtAdmit)
+	}
+	if got := b.Load(); got != (Load{InFlight: 2, PendingPrefillTokens: 1500}) {
+		t.Fatalf("Load after two admits = %+v", got)
+	}
+
+	first.FirstToken()
+	first.FirstToken() // idempotent
+	if got := b.Load(); got != (Load{InFlight: 2, PendingPrefillTokens: 500, Decoding: 1}) {
+		t.Fatalf("Load after first token = %+v", got)
+	}
+
+	first.Done()
+	second.Done() // done before its first token: its prefill work is released
+	second.Done() // idempotent
+	second.FirstToken()
+	if got := b.Load(); got != (Load{}) {
+		t.Errorf("Load after all done = %+v, want zero", got)
 	}
 }
 

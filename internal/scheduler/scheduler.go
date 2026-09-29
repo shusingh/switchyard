@@ -11,6 +11,7 @@ import (
 	"math/rand/v2"
 	"slices"
 	"sync/atomic"
+	"time"
 
 	"github.com/shusingh/switchyard/internal/backend"
 )
@@ -22,6 +23,7 @@ const (
 	PolicyLeastLoaded    = "least_loaded"
 	PolicyP2C            = "p2c"
 	PolicyPrefixAffinity = "prefix_affinity"
+	PolicyEstimatedTTFT  = "estimated_ttft"
 )
 
 // ErrNoCandidates is returned when there is no healthy backend to choose.
@@ -35,6 +37,11 @@ type Request struct {
 	// Matched[b] is the number of leading blocks believed cached on the
 	// backend with Index() b. It is nil when prefix tracking is off.
 	Matched []int
+	// PromptTokens is the estimated size of the prompt.
+	PromptTokens int64
+	// PredictedTTFT is set by policies that predict time to first token, for
+	// the chosen backend. It is zero otherwise.
+	PredictedTTFT time.Duration
 }
 
 // MatchedOn returns the number of the request's leading blocks believed
@@ -58,13 +65,24 @@ type Policy interface {
 
 // Names returns the names of all available policies, sorted.
 func Names() []string {
-	names := []string{PolicyRoundRobin, PolicyRandom, PolicyLeastLoaded, PolicyP2C, PolicyPrefixAffinity}
+	names := []string{PolicyRoundRobin, PolicyRandom, PolicyLeastLoaded, PolicyP2C, PolicyPrefixAffinity, PolicyEstimatedTTFT}
 	slices.Sort(names)
 	return names
 }
 
+// Options configures the policies that need more than their name.
+type Options struct {
+	// Estimator is required by estimated_ttft.
+	Estimator *Estimator
+	// BalanceAbs, BalanceRel, and TieEpsilon tune estimated_ttft; see its
+	// documentation.
+	BalanceAbs int64
+	BalanceRel float64
+	TieEpsilon float64
+}
+
 // New returns the policy with the given name.
-func New(name string) (Policy, error) {
+func New(name string, opts Options) (Policy, error) {
 	switch name {
 	case PolicyRoundRobin:
 		return &roundRobin{}, nil
@@ -76,6 +94,16 @@ func New(name string) (Policy, error) {
 		return p2c{}, nil
 	case PolicyPrefixAffinity:
 		return prefixAffinity{}, nil
+	case PolicyEstimatedTTFT:
+		if opts.Estimator == nil {
+			return nil, errors.New("estimated_ttft needs an estimator")
+		}
+		return &estimatedTTFT{
+			est:        opts.Estimator,
+			balanceAbs: opts.BalanceAbs,
+			balanceRel: opts.BalanceRel,
+			tieEpsilon: opts.TieEpsilon,
+		}, nil
 	default:
 		return nil, fmt.Errorf("unknown routing policy %q (valid: %v)", name, Names())
 	}

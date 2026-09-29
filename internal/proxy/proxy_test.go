@@ -44,7 +44,7 @@ func frontServer(t *testing.T, p *Proxy, target *backend.Backend) (*httptest.Ser
 	outcomes := make(chan forwardOutcome, 1)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
-		res, err := p.Forward(w, r, target, body)
+		res, err := p.Forward(w, r, target, body, nil)
 		outcomes <- forwardOutcome{res, err}
 	}))
 	t.Cleanup(srv.Close)

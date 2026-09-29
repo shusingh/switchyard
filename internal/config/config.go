@@ -104,6 +104,24 @@ type Routing struct {
 	// bounds how many prefix blocks the router believes it holds. Backends
 	// may override it.
 	KVCapacityTokens int `yaml:"kv_capacity_tokens"`
+
+	// PrefillTokensPerSecond is each backend's assumed prefill throughput
+	// until observed time to first token refines it.
+	PrefillTokensPerSecond float64 `yaml:"prefill_tokens_per_second"`
+	// TTFTOverhead is the fixed part of time to first token.
+	TTFTOverhead time.Duration `yaml:"ttft_overhead"`
+	// DecodePenalty is added to a prediction per request the backend is
+	// decoding.
+	DecodePenalty time.Duration `yaml:"decode_penalty"`
+	// BalanceAbs and BalanceRel define skewed load for estimated_ttft's
+	// imbalance guard: the busiest backend has more than BalanceAbs more
+	// in-flight requests than the idlest, and more than BalanceRel times as
+	// many.
+	BalanceAbs int     `yaml:"balance_abs"`
+	BalanceRel float64 `yaml:"balance_rel"`
+	// TieEpsilon treats predictions within this fraction of the best as
+	// ties, chosen at random.
+	TieEpsilon float64 `yaml:"tie_epsilon"`
 }
 
 // IndexCapacityBlocks returns backend b's prefix index budget in blocks: its
@@ -174,6 +192,12 @@ func (c *Config) ApplyDefaults() {
 	setDefault(&c.Routing.IndexTTL, 10*time.Minute)
 	setDefault(&c.Routing.BytesPerToken, 4.0)
 	setDefault(&c.Routing.KVCapacityTokens, 100_000)
+	setDefault(&c.Routing.PrefillTokensPerSecond, 10_000)
+	setDefault(&c.Routing.TTFTOverhead, 20*time.Millisecond)
+	setDefault(&c.Routing.DecodePenalty, 500*time.Microsecond)
+	setDefault(&c.Routing.BalanceAbs, 16)
+	setDefault(&c.Routing.BalanceRel, 1.5)
+	setDefault(&c.Routing.TieEpsilon, 0.05)
 	setDefault(&c.Log.Level, "info")
 }
 
@@ -231,6 +255,18 @@ func (c *Config) Validate() error {
 	}
 	if c.Routing.BytesPerToken <= 0 {
 		fail("routing.bytes_per_token", "must be positive, got %g", c.Routing.BytesPerToken)
+	}
+	if c.Routing.PrefillTokensPerSecond <= 0 {
+		fail("routing.prefill_tokens_per_second", "must be positive, got %g", c.Routing.PrefillTokensPerSecond)
+	}
+	if c.Routing.TTFTOverhead < 0 || c.Routing.DecodePenalty < 0 {
+		fail("routing.ttft_overhead", "ttft_overhead and decode_penalty must not be negative")
+	}
+	if c.Routing.BalanceAbs < 1 || c.Routing.BalanceRel < 1 {
+		fail("routing.balance_abs", "balance_abs must be at least 1 and balance_rel at least 1.0")
+	}
+	if c.Routing.TieEpsilon < 0 || c.Routing.TieEpsilon > 1 {
+		fail("routing.tie_epsilon", "must be between 0 and 1, got %g", c.Routing.TieEpsilon)
 	}
 	if c.Routing.KVCapacityTokens < 1 {
 		fail("routing.kv_capacity_tokens", "must be at least 1, got %d", c.Routing.KVCapacityTokens)

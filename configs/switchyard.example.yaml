@@ -41,8 +41,34 @@ proxy:
   max_idle_conns_per_host: 256
 
 routing:
-  # One of: random, round_robin.
+  # One of: estimated_ttft, least_loaded, p2c, prefix_affinity, random,
+  # round_robin. estimated_ttft is Switchyard's cache- and load-aware policy;
+  # the others are baselines for comparison.
   policy: round_robin
+
+  # Prefix tracking (docs/engineering/design.md sections 6 and 7). The router
+  # maintains it under every policy, so overhead is equal across policies.
+  block_bytes: 128
+  max_blocks: 4096
+  # How long the router trusts that a backend still caches a prefix.
+  index_ttl: 10m
+  # Request bytes per token; refined at run time from reported usage.
+  bytes_per_token: 4.0
+  # KV cache capacity per backend. For vLLM, num_gpu_blocks times block_size
+  # from vllm:cache_config_info. Backends can override it individually.
+  kv_capacity_tokens: 100000
+
+  # Time-to-first-token model (design.md section 9).
+  # Initial prefill throughput; refined at run time from observed TTFT.
+  prefill_tokens_per_second: 10000
+  ttft_overhead: 20ms
+  decode_penalty: 500us
+  # Imbalance guard: skip backends with more than balance_abs more in-flight
+  # requests than the idlest and more than balance_rel times as many.
+  balance_abs: 16
+  balance_rel: 1.5
+  # Predictions within this fraction of the best count as ties.
+  tie_epsilon: 0.05
 
 log:
   # One of: debug, info, warn, error.

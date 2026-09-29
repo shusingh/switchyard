@@ -19,7 +19,11 @@ type Backend struct {
 
 	healthy    atomic.Bool
 	generation atomic.Uint64
-	inFlight   atomic.Int64
+
+	// Load, maintained through Tickets. See load.go.
+	inFlight       atomic.Int64
+	pendingPrefill atomic.Int64
+	decoding       atomic.Int64
 
 	// Health-check bookkeeping. Only the HealthChecker reads or writes these
 	// fields, from one goroutine per backend per round, and rounds never
@@ -43,16 +47,6 @@ func (b *Backend) Healthy() bool { return b.healthy.Load() }
 // from an earlier generation, such as cached-prefix beliefs, is stale because
 // the server may have restarted with an empty cache.
 func (b *Backend) Generation() uint64 { return b.generation.Load() }
-
-// InFlight returns the number of requests currently proxied to the backend.
-func (b *Backend) InFlight() int64 { return b.inFlight.Load() }
-
-// BeginRequest records the start of a proxied request. Every call must be
-// paired with EndRequest.
-func (b *Backend) BeginRequest() { b.inFlight.Add(1) }
-
-// EndRequest records the end of a proxied request.
-func (b *Backend) EndRequest() { b.inFlight.Add(-1) }
 
 // Endpoint returns the absolute URL for path and rawQuery on this backend.
 func (b *Backend) Endpoint(path, rawQuery string) *url.URL {

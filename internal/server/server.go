@@ -33,8 +33,11 @@ type Options struct {
 	// Keyer and Index track which backends hold which prompt prefixes. They
 	// are maintained under every policy, including cache-blind ones, so the
 	// per-request overhead is identical when policies are compared.
-	Keyer           *prefix.Keyer
-	Index           *prefix.Index
+	Keyer *prefix.Keyer
+	Index *prefix.Index
+	// Estimator predicts time to first token and learns from outcomes. Like
+	// the index, it runs under every policy.
+	Estimator       *scheduler.Estimator
 	Logger          *slog.Logger
 	MaxRequestBytes int64
 }
@@ -46,6 +49,7 @@ type Server struct {
 	proxy           *proxy.Proxy
 	keyer           *prefix.Keyer
 	index           *prefix.Index
+	estimator       *scheduler.Estimator
 	logger          *slog.Logger
 	maxRequestBytes int64
 }
@@ -58,6 +62,7 @@ func New(opts Options) *Server {
 		proxy:           opts.Proxy,
 		keyer:           opts.Keyer,
 		index:           opts.Index,
+		estimator:       opts.Estimator,
 		logger:          opts.Logger,
 		maxRequestBytes: opts.MaxRequestBytes,
 	}
@@ -78,19 +83,8 @@ func (s *Server) Handler() http.Handler {
 // handleInference routes one completion request to a backend.
 func (s *Server) handleInference(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
-	reqLog := s.logger.With(
-		slog.String("request_id", RequestID(r.Context())),
-		slog.String("path", r.URL.Path),
-	)
-
-	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, s.maxRequestBytes))
-	if err != nil {
-		if maxErr, ok := errors.AsType[*http.MaxBytesError](err); ok {
-			openai.WriteError(w, http.StatusRequestEntityTooLarge, openai.ErrTypeInvalidRequest,
-				"request body exceeds "+formatBytes(maxErr.Limit))
-			return
-		}
-		openai.WriteError(w, http.StatusBadRequest, openai.ErrTypeInvalidRequest, "could not read request body")
+	body, ok := s.readBody(w, r)
+	if !ok {
 		return
 	}
 	parsed, err := s.keyer.Parse(body, r.URL.Path == openai.PathChatCompletions)
@@ -98,23 +92,29 @@ func (s *Server) handleInference(w http.ResponseWriter, r *http.Request) {
 		openai.WriteError(w, http.StatusBadRequest, openai.ErrTypeInvalidRequest, err.Error())
 		return
 	}
-	fields := parsed.Fields
 
-	backends := len(s.pool.Backends())
-	route := &scheduler.Request{Model: fields.Model, Blocks: len(parsed.Hashes), Matched: make([]int, backends)}
-	s.index.Match(parsed.Hashes, s.pool.Generations(make([]uint64, 0, backends)), route.Matched)
+	route := s.newRoute(&parsed)
 	b, ok := s.pick(w, route)
 	if !ok {
-		reqLog.Warn("no healthy backend", slog.String("model", fields.Model))
+		s.logger.Warn("no healthy backend",
+			slog.String("request_id", RequestID(r.Context())),
+			slog.String("model", route.Model))
 		return
 	}
 	// Record the belief before forwarding, so concurrent requests with the
 	// same prefix see it immediately.
 	s.index.Insert(b.Index(), b.Generation(), parsed.Hashes)
 
-	b.BeginRequest()
-	res, err := s.proxy.Forward(w, r, b, body)
-	b.EndRequest()
+	uncached := s.estimator.UncachedTokens(route.PromptTokens, route.MatchedOn(b))
+	if route.PredictedTTFT == 0 {
+		// Cache-blind policies do not predict; predict anyway so every policy
+		// reports the same prediction-error measure.
+		route.PredictedTTFT = s.estimator.TTFT(b, uncached)
+	}
+	ticket := b.Admit(uncached)
+	res, err := s.proxy.Forward(w, r, b, body, ticket.FirstToken)
+	ticket.Done()
+	s.learn(b, ticket, &parsed, &res)
 
 	status := res.Status
 	switch {
@@ -125,34 +125,100 @@ func (s *Server) handleInference(w http.ResponseWriter, r *http.Request) {
 		status = http.StatusBadGateway
 		openai.WriteError(w, status, openai.ErrTypeServer, "backend request failed")
 	}
+	s.logRequest(r, requestLog{
+		start: start, bodyBytes: len(body), parsed: &parsed, route: route, backend: b,
+		uncached: uncached, status: status, res: &res, err: err,
+	})
+}
 
-	attrs := []slog.Attr{
-		slog.String("model", fields.Model),
-		slog.Bool("stream", fields.Stream),
-		slog.String("policy", s.policy.Name()),
-		slog.String("backend", b.ID()),
-		slog.Int("prefix_blocks", route.Blocks),
-		slog.Int("matched_blocks", route.MatchedOn(b)),
-		slog.Int("status", status),
-		slog.Int("request_bytes", len(body)),
-		slog.Int64("response_bytes", res.BytesWritten),
-		slog.Duration("duration", time.Since(start)),
-		slog.Duration("first_byte", res.FirstByte),
+// readBody reads the request body within the size limit, or writes an error
+// response and returns false.
+func (s *Server) readBody(w http.ResponseWriter, r *http.Request) ([]byte, bool) {
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, s.maxRequestBytes))
+	if err == nil {
+		return body, true
 	}
-	if res.Streamed {
-		attrs = append(attrs, slog.Duration("first_token", res.FirstToken), slog.Int("events", res.Events))
+	if maxErr, ok := errors.AsType[*http.MaxBytesError](err); ok {
+		openai.WriteError(w, http.StatusRequestEntityTooLarge, openai.ErrTypeInvalidRequest,
+			"request body exceeds "+formatBytes(maxErr.Limit))
+		return nil, false
+	}
+	openai.WriteError(w, http.StatusBadRequest, openai.ErrTypeInvalidRequest, "could not read request body")
+	return nil, false
+}
+
+// newRoute describes a parsed request to the scheduler: its size and how
+// much of it each backend is believed to cache.
+func (s *Server) newRoute(parsed *prefix.Request) *scheduler.Request {
+	backends := len(s.pool.Backends())
+	route := &scheduler.Request{
+		Model:        parsed.Fields.Model,
+		Blocks:       len(parsed.Hashes),
+		Matched:      make([]int, backends),
+		PromptTokens: s.estimator.PromptTokens(parsed.CanonicalBytes),
+	}
+	s.index.Match(parsed.Hashes, s.pool.Generations(make([]uint64, 0, backends)), route.Matched)
+	return route
+}
+
+// learn feeds a finished request's measurements back into the estimator.
+func (s *Server) learn(b *backend.Backend, ticket *backend.Ticket, parsed *prefix.Request, res *proxy.Result) {
+	if res.FirstToken > 0 {
+		s.estimator.ObserveTTFT(b.Index(), ticket.QueueTokensAtAdmit+ticket.PrefillTokens(), res.FirstToken)
 	}
 	if res.Usage != nil {
+		s.estimator.ObserveUsage(parsed.CanonicalBytes, res.Usage.PromptTokens)
+	}
+}
+
+// requestLog gathers what the access log line reports about one request.
+type requestLog struct {
+	start     time.Time
+	bodyBytes int
+	parsed    *prefix.Request
+	route     *scheduler.Request
+	backend   *backend.Backend
+	uncached  int64
+	status    int
+	res       *proxy.Result
+	err       error
+}
+
+// logRequest writes one access log line. It never includes prompt or
+// completion content.
+func (s *Server) logRequest(r *http.Request, l requestLog) {
+	attrs := []slog.Attr{
+		slog.String("request_id", RequestID(r.Context())),
+		slog.String("path", r.URL.Path),
+		slog.String("model", l.route.Model),
+		slog.Bool("stream", l.parsed.Fields.Stream),
+		slog.String("policy", s.policy.Name()),
+		slog.String("backend", l.backend.ID()),
+		slog.Int("status", l.status),
+		slog.Int("prefix_blocks", l.route.Blocks),
+		slog.Int("matched_blocks", l.route.MatchedOn(l.backend)),
+		slog.Int64("prompt_tokens_estimate", l.route.PromptTokens),
+		slog.Int64("uncached_tokens_estimate", l.uncached),
+		slog.Duration("predicted_ttft", l.route.PredictedTTFT),
+		slog.Int("request_bytes", l.bodyBytes),
+		slog.Int64("response_bytes", l.res.BytesWritten),
+		slog.Duration("duration", time.Since(l.start)),
+		slog.Duration("first_byte", l.res.FirstByte),
+	}
+	if l.res.Streamed {
+		attrs = append(attrs, slog.Duration("first_token", l.res.FirstToken), slog.Int("events", l.res.Events))
+	}
+	if l.res.Usage != nil {
 		attrs = append(attrs,
-			slog.Int("prompt_tokens", res.Usage.PromptTokens),
-			slog.Int("completion_tokens", res.Usage.CompletionTokens))
+			slog.Int("prompt_tokens", l.res.Usage.PromptTokens),
+			slog.Int("completion_tokens", l.res.Usage.CompletionTokens))
 	}
 	level := slog.LevelInfo
-	if err != nil && status != statusClientClosedRequest {
+	if l.err != nil && l.status != statusClientClosedRequest {
 		level = slog.LevelWarn
-		attrs = append(attrs, slog.String("error", err.Error()))
+		attrs = append(attrs, slog.String("error", l.err.Error()))
 	}
-	reqLog.LogAttrs(r.Context(), level, "request", attrs...)
+	s.logger.LogAttrs(r.Context(), level, "request", attrs...)
 }
 
 // handleModels proxies the model list from one healthy backend. Every
@@ -162,9 +228,9 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	b.BeginRequest()
-	defer b.EndRequest()
-	if res, err := s.proxy.Forward(w, r, b, nil); err != nil && !res.HeaderWritten && r.Context().Err() == nil {
+	ticket := b.Admit(0)
+	defer ticket.Done()
+	if res, err := s.proxy.Forward(w, r, b, nil, nil); err != nil && !res.HeaderWritten && r.Context().Err() == nil {
 		openai.WriteError(w, http.StatusBadGateway, openai.ErrTypeServer, "backend request failed")
 	}
 }

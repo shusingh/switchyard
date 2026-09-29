@@ -50,7 +50,19 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	policy, err := scheduler.New(cfg.Routing.Policy)
+	estimator := scheduler.NewEstimator(scheduler.EstimatorConfig{
+		InitialPrefillTokensPerSecond: cfg.Routing.PrefillTokensPerSecond,
+		Overhead:                      cfg.Routing.TTFTOverhead,
+		DecodePenalty:                 cfg.Routing.DecodePenalty,
+		InitialBytesPerToken:          cfg.Routing.BytesPerToken,
+		BlockBytes:                    cfg.Routing.BlockBytes,
+	}, len(cfg.Backends))
+	policy, err := scheduler.New(cfg.Routing.Policy, scheduler.Options{
+		Estimator:  estimator,
+		BalanceAbs: int64(cfg.Routing.BalanceAbs),
+		BalanceRel: cfg.Routing.BalanceRel,
+		TieEpsilon: cfg.Routing.TieEpsilon,
+	})
 	if err != nil {
 		return err
 	}
@@ -84,6 +96,7 @@ func run() error {
 		Proxy:           proxy.New(cfg.Proxy),
 		Keyer:           prefix.NewKeyer(cfg.Routing.BlockBytes, cfg.Routing.MaxBlocks),
 		Index:           prefix.NewIndex(capacities, cfg.Routing.IndexTTL, nil),
+		Estimator:       estimator,
 		Logger:          logger,
 		MaxRequestBytes: cfg.Server.MaxRequestBytes,
 	})

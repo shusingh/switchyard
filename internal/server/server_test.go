@@ -72,7 +72,7 @@ func newHarness(t *testing.T, opts harnessOptions) *harness {
 
 	policy := opts.policy
 	if policy == nil {
-		policy, _ = scheduler.New(scheduler.PolicyRoundRobin)
+		policy, _ = scheduler.New(scheduler.PolicyRoundRobin, scheduler.Options{})
 	}
 	if opts.maxRequestBytes == 0 {
 		opts.maxRequestBytes = 1 << 20
@@ -84,7 +84,7 @@ func newHarness(t *testing.T, opts harnessOptions) *harness {
 	t.Cleanup(px.CloseIdleConnections)
 
 	router := httptest.NewServer(New(Options{
-		Pool: pool, Policy: policy, Proxy: px, Keyer: testKeyer(), Index: testIndex(len(backends)),
+		Pool: pool, Policy: policy, Proxy: px, Keyer: testKeyer(), Index: testIndex(len(backends)), Estimator: testEstimator(len(backends)),
 		Logger: slog.New(slog.DiscardHandler), MaxRequestBytes: opts.maxRequestBytes,
 	}).Handler())
 	t.Cleanup(router.Close)
@@ -97,6 +97,15 @@ func newHarness(t *testing.T, opts harnessOptions) *harness {
 }
 
 func testKeyer() *prefix.Keyer { return prefix.NewKeyer(64, 4096) }
+
+func testEstimator(backends int) *scheduler.Estimator {
+	return scheduler.NewEstimator(scheduler.EstimatorConfig{
+		InitialPrefillTokensPerSecond: 10000,
+		Overhead:                      10 * time.Millisecond,
+		InitialBytesPerToken:          4,
+		BlockBytes:                    64,
+	}, backends)
+}
 
 func testIndex(backends int) *prefix.Index {
 	capacities := make([]int, backends)
@@ -158,7 +167,7 @@ func TestRoundRobinSpreadsRequests(t *testing.T) {
 
 func TestPrefixAffinityKeepsSharedPrefixOnOneBackend(t *testing.T) {
 	t.Parallel()
-	policy, _ := scheduler.New(scheduler.PolicyPrefixAffinity)
+	policy, _ := scheduler.New(scheduler.PolicyPrefixAffinity, scheduler.Options{})
 	h := newHarness(t, harnessOptions{engines: fastEngines(4), policy: policy})
 	system := strings.Repeat("Follow the operator's compliance policy exactly. ", 60)
 	for i := range 8 {
@@ -313,11 +322,11 @@ func TestUnreachableBackendReturnsBadGateway(t *testing.T) {
 	checker.CloseIdleConnections()
 	dead.Close()
 
-	policy, _ := scheduler.New(scheduler.PolicyRoundRobin)
+	policy, _ := scheduler.New(scheduler.PolicyRoundRobin, scheduler.Options{})
 	px := proxy.New(config.Proxy{DialTimeout: time.Second, ResponseHeaderTimeout: time.Second, StreamIdleTimeout: time.Second, MaxIdleConnsPerHost: 1})
 	t.Cleanup(px.CloseIdleConnections)
 	router := httptest.NewServer(New(Options{
-		Pool: pool, Policy: policy, Proxy: px, Keyer: testKeyer(), Index: testIndex(1),
+		Pool: pool, Policy: policy, Proxy: px, Keyer: testKeyer(), Index: testIndex(1), Estimator: testEstimator(1),
 		Logger: slog.New(slog.DiscardHandler), MaxRequestBytes: 1 << 20,
 	}).Handler())
 	t.Cleanup(router.Close)
