@@ -36,11 +36,18 @@ start() {
   mkdir -p "$RUN_DIR"
 
   local config="$RUN_DIR/router.yaml"
+  # Routing parameters match the simulated engines' defaults (sim.CostModel):
+  # 2,340 blocks of 16 tokens, 5.55 bytes per token, 14,000 prefill tokens per
+  # second. Explain headers let loadgen measure prediction error.
   {
     echo "server:"
     echo "  listen: \":$ROUTER_PORT\""
+    echo "  explain_headers: true"
     echo "routing:"
     echo "  policy: $policy"
+    echo "  bytes_per_token: 5.55"
+    echo "  kv_capacity_tokens: 37440"
+    echo "  prefill_tokens_per_second: 14000"
     echo "log:"
     echo "  level: warn"
     echo "backends:"
