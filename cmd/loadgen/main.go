@@ -54,7 +54,7 @@ func main() {
 func usage(w io.Writer) {
 	_, _ = fmt.Fprintln(w, `usage:
   loadgen run    -url URL -model MODEL -workload agent|prefix|mooncake -out FILE [flags]
-  loadgen report [-slo DURATION] FILE...
+  loadgen report [-slo DURATION] [-group] FILE...
 
 Run "loadgen run -h" or "loadgen report -h" for flags.`)
 }
@@ -234,51 +234,31 @@ func resetCaches(ctx context.Context, client *http.Client, urls []string) error 
 func reportCommand(args []string, out io.Writer) error {
 	fs := flag.NewFlagSet("report", flag.ContinueOnError)
 	slo := fs.Duration("slo", 2*time.Second, "time-to-first-token objective for goodput")
+	group := fs.Bool("group", false, "combine trials of one configuration into a row with the median and range")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if fs.NArg() == 0 {
 		return errors.New("report: give at least one results file")
 	}
-	// Build the table in memory, where writes cannot fail, and write it once.
-	var b strings.Builder
-	fmt.Fprintf(&b, "| Run | Requests | Failed | Goodput (TTFT <= %s) | TTFT p50 | TTFT p90 | TTFT p99 | TPOT p50 | Output tok/s | Cache hit rate | Router-believed hit rate | TTFT prediction error p50 |\n", *slo)
-	b.WriteString("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n")
+	runs := make([]loadgen.Run, 0, fs.NArg())
 	for _, path := range fs.Args() {
 		records, err := loadgen.ReadRecords(path)
 		if err != nil {
 			return err
 		}
-		s := loadgen.Summarize(records, *slo)
-		label, hit := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path)), "n/a"
+		run := loadgen.Run{
+			Label:   strings.TrimSuffix(filepath.Base(path), filepath.Ext(path)),
+			Summary: loadgen.Summarize(records, *slo),
+		}
 		var meta Metadata
 		if err := readJSON(path+".meta.json", &meta); err == nil {
-			label = meta.Label
-			if meta.HitRate != nil {
-				hit = fmt.Sprintf("%.1f%%", 100**meta.HitRate)
-			}
+			run.Label, run.HitRate = meta.Label, meta.HitRate
 		}
-		believed, predErr := "n/a", "n/a"
-		if s.BelievedHitRate > 0 {
-			believed = fmt.Sprintf("%.1f%%", 100*s.BelievedHitRate)
-		}
-		if s.PredictionError.P50 > 0 {
-			predErr = fmtMS(s.PredictionError.P50)
-		}
-		fmt.Fprintf(&b, "| %s | %d | %d | %.1f%% | %s | %s | %s | %s | %.0f | %s | %s | %s |\n",
-			label, s.Requests, s.Failed, 100*s.Goodput,
-			fmtMS(s.TTFT.P50), fmtMS(s.TTFT.P90), fmtMS(s.TTFT.P99), fmtMS(s.TPOT.P50),
-			s.OutputTokensPerSec, hit, believed, predErr)
+		runs = append(runs, run)
 	}
-	_, err := io.WriteString(out, b.String())
+	_, err := io.WriteString(out, loadgen.Table(runs, *slo, *group))
 	return err
-}
-
-func fmtMS(v float64) string {
-	if v >= 1000 {
-		return fmt.Sprintf("%.2f s", v/1000)
-	}
-	return fmt.Sprintf("%.0f ms", v)
 }
 
 func splitList(s string) []string {

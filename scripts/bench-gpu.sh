@@ -91,6 +91,6 @@ done
   echo "Four vLLM replicas of $MODEL on one RTX 4090 (see deploy/vllm/README.md and ADR 0009)."
   echo "Replicas share one GPU; results compare policies under identical conditions."
   echo
-  "bin/loadgen$EXE" report "$out_dir"/*.jsonl
+  "bin/loadgen$EXE" report -group "$out_dir"/*.jsonl
 } >"$out_dir/summary.md"
 cat "$out_dir/summary.md"
