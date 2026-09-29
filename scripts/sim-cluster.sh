@@ -7,12 +7,14 @@
 #   scripts/sim-cluster.sh stop
 #
 # Environment: ROUTER_PORT (8080), BASE_PORT (9001), SIM_FLAGS (extra
-# simengine flags), BIN_DIR (./bin). Run `make build` first.
+# simengine flags), ROUTING_EXTRA (extra YAML lines under routing, such as
+# "  block_bytes: 64"), SIM_RUN_DIR (.run/sim; use a separate one per
+# concurrent cluster), BIN_DIR (./bin). Run `make build` first.
 set -euo pipefail
 
 cd "$(git rev-parse --show-toplevel)"
 
-RUN_DIR=.run/sim
+RUN_DIR=${SIM_RUN_DIR:-.run/sim}
 BIN_DIR=${BIN_DIR:-bin}
 ROUTER_PORT=${ROUTER_PORT:-8080}
 BASE_PORT=${BASE_PORT:-9001}
@@ -48,6 +50,9 @@ start() {
     echo "  bytes_per_token: 5.55"
     echo "  kv_capacity_tokens: 37440"
     echo "  prefill_tokens_per_second: 14000"
+    if [[ -n "${ROUTING_EXTRA:-}" ]]; then
+      echo "$ROUTING_EXTRA"
+    fi
     echo "log:"
     echo "  level: warn"
     echo "backends:"
