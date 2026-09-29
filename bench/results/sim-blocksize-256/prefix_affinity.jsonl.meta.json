@@ -1,0 +1,26 @@
+{
+  "label": "prefix_affinity (4 replicas, simulated)",
+  "workload": "agent",
+  "parameters": {
+    "backends": "http://localhost:9101,http://localhost:9102,http://localhost:9103,http://localhost:9104",
+    "duration": "5m0s",
+    "label": "prefix_affinity (4 replicas, simulated)",
+    "model": "sim-model",
+    "out": "bench/results/sim-blocksize-256/prefix_affinity.jsonl",
+    "rate": "0.5",
+    "url": "http://localhost:8180",
+    "workload": "agent"
+  },
+  "requests": 1657,
+  "started": "2026-09-29T08:25:53.6937269-07:00",
+  "finished": "2026-09-29T08:34:36.0722739-07:00",
+  "cache_before": {
+    "queries": 0,
+    "hits": 0
+  },
+  "cache_after": {
+    "queries": 11200160,
+    "hits": 9794416
+  },
+  "cache_hit_rate": 0.8744889358723447
+}

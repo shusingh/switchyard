@@ -16,3 +16,4 @@ Accepted ADRs are not edited; a new ADR supersedes an old one. See
 | [0008](0008-go-1-27-toolchain.md) | Target the Go 1.27 toolchain | Accepted |
 | [0009](0009-benchmark-replica-configuration.md) | Benchmark on four small replicas with fixed 1 GiB KV caches | Accepted |
 | [0010](0010-precise-mode-dependencies.md) | ZeroMQ and msgpack libraries for precise mode | Accepted |
+| [0011](0011-prefix-block-size.md) | Keep 128-byte prefix blocks in approximate mode | Accepted |
