@@ -1,6 +1,9 @@
-// Package sim implements a simulated OpenAI-compatible model server. It speaks
-// the same wire format as vLLM, including the empty role chunk that opens a
-// chat stream, so the router can be tested end to end without a GPU.
+// Package sim implements a simulated OpenAI-compatible model server. It
+// speaks the same wire format as vLLM, including the empty role chunk that
+// opens a chat stream, and models the behavior that matters for routing: a
+// fixed-size KV cache with automatic prefix caching, chunked prefill, and
+// continuous batching. Latency is not scripted; it emerges from queueing and
+// batching under the cost model.
 //
 // Simulated results are always labeled as simulated; see
 // docs/adr/0005-build-a-simulated-engine.md.
@@ -19,52 +22,88 @@ import (
 	"github.com/shusingh/switchyard/internal/openai"
 )
 
-const (
-	// maxRequestBytes bounds request bodies the engine accepts.
-	maxRequestBytes = 64 << 20
-	// bytesPerToken approximates tokenization when reporting prompt usage.
-	// English text averages about four bytes per token.
-	bytesPerToken = 4
-)
+// maxRequestBytes bounds request bodies the engine accepts.
+const maxRequestBytes = 64 << 20
 
-// Options configures the engine's behavior.
+// Options configures an Engine.
 type Options struct {
-	// Model is the model name the engine reports and accepts.
+	// Model is the model name the engine serves and accepts.
 	Model string
-	// FirstTokenDelay is the time from request to first generated token.
-	FirstTokenDelay time.Duration
-	// TokenInterval is the time between generated tokens.
-	TokenInterval time.Duration
-	// DefaultOutputTokens is used when a request sets no output limit.
+	// Cost sets capacity and speed. Zero fields take DefaultCostModel values.
+	Cost CostModel
+	// DefaultOutputTokens is generated when a request sets no output limit.
 	DefaultOutputTokens int
 }
 
-// Stats counts requests by outcome.
+// Stats counts requests and cache use.
 type Stats struct {
-	Active    int64
+	Running   int64
+	Waiting   int64
 	Completed int64
 	Cancelled int64
+	// PromptTokens and CachedPromptTokens mirror vLLM's
+	// prefix_cache_queries and prefix_cache_hits counters.
+	PromptTokens       int64
+	CachedPromptTokens int64
 }
 
-// Engine is a simulated model server. It is safe for concurrent use.
+// Engine is a simulated model server. Create it with NewEngine, serve its
+// Handler, and run its scheduler with Run.
 type Engine struct {
 	opts      Options
-	active    atomic.Int64
+	sched     *scheduler
+	tokenizer *tokenizer
 	completed atomic.Int64
 	cancelled atomic.Int64
 }
 
 // NewEngine returns an engine with the given options.
 func NewEngine(opts Options) *Engine {
+	opts.Cost = withDefaults(opts.Cost)
 	if opts.DefaultOutputTokens <= 0 {
 		opts.DefaultOutputTokens = 16
 	}
-	return &Engine{opts: opts}
+	return &Engine{
+		opts:      opts,
+		sched:     newScheduler(opts.Cost),
+		tokenizer: newTokenizer(opts.Cost.BlockTokens),
+	}
 }
 
-// Stats returns a snapshot of the engine's request counters.
+func withDefaults(m CostModel) CostModel {
+	d := DefaultCostModel()
+	setIfZero(&m.BlockTokens, d.BlockTokens)
+	setIfZero(&m.CapacityBlocks, d.CapacityBlocks)
+	setIfZero(&m.PrefillTokensPerSecond, d.PrefillTokensPerSecond)
+	setIfZero(&m.StepOverhead, d.StepOverhead)
+	setIfZero(&m.DecodeCostPerSequence, d.DecodeCostPerSequence)
+	setIfZero(&m.MaxBatchTokens, d.MaxBatchTokens)
+	setIfZero(&m.MaxRunning, d.MaxRunning)
+	setIfZero(&m.MaxModelLen, d.MaxModelLen)
+	return m
+}
+
+func setIfZero[T comparable](field *T, value T) {
+	var zero T
+	if *field == zero {
+		*field = value
+	}
+}
+
+// Run executes the engine's scheduler until ctx is cancelled. Requests still
+// in flight at that point are aborted.
+func (e *Engine) Run(ctx context.Context) { e.sched.run(ctx) }
+
+// Stats returns a snapshot of the engine's counters.
 func (e *Engine) Stats() Stats {
-	return Stats{Active: e.active.Load(), Completed: e.completed.Load(), Cancelled: e.cancelled.Load()}
+	return Stats{
+		Running:            e.sched.numRunning.Load(),
+		Waiting:            e.sched.numWaiting.Load(),
+		Completed:          e.completed.Load(),
+		Cancelled:          e.cancelled.Load(),
+		PromptTokens:       e.sched.queryTokens.Load(),
+		CachedPromptTokens: e.sched.hitTokens.Load(),
+	}
 }
 
 // Handler returns the engine's HTTP API.
@@ -74,6 +113,11 @@ func (e *Engine) Handler() http.Handler {
 	mux.HandleFunc("POST "+openai.PathCompletions, func(w http.ResponseWriter, r *http.Request) { e.serve(w, r, false) })
 	mux.HandleFunc("GET "+openai.PathModels, e.handleModels)
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
+	mux.HandleFunc("GET /metrics", e.handleMetrics)
+	mux.HandleFunc("POST /reset_prefix_cache", func(w http.ResponseWriter, _ *http.Request) {
+		e.sched.requestReset()
+		w.WriteHeader(http.StatusOK)
+	})
 	return mux
 }
 
@@ -83,9 +127,14 @@ func (e *Engine) serve(w http.ResponseWriter, r *http.Request, chat bool) {
 		openai.WriteError(w, http.StatusBadRequest, openai.ErrTypeInvalidRequest, "could not read request body")
 		return
 	}
-	var fields openai.RoutingFields
-	if err := json.Unmarshal(body, &fields); err != nil {
+	var req chatRequest
+	if err := json.Unmarshal(body, &req); err != nil {
 		openai.WriteError(w, http.StatusBadRequest, openai.ErrTypeInvalidRequest, "malformed request body")
+		return
+	}
+	fields, err := openai.DecodeRoutingFields(body)
+	if err != nil {
+		openai.WriteError(w, http.StatusBadRequest, openai.ErrTypeInvalidRequest, err.Error())
 		return
 	}
 	if fields.Model != e.opts.Model {
@@ -93,48 +142,84 @@ func (e *Engine) serve(w http.ResponseWriter, r *http.Request, chat bool) {
 			fmt.Sprintf("model %q does not exist", fields.Model))
 		return
 	}
-	tokens := fields.MaxOutputTokens()
-	if tokens <= 0 {
-		tokens = e.opts.DefaultOutputTokens
+	outputTokens := fields.MaxOutputTokens()
+	if outputTokens <= 0 {
+		outputTokens = e.opts.DefaultOutputTokens
+	}
+	p := e.tokenizer.tokenize(render(&req, chat))
+	p.tokens = max(p.tokens, 1)
+	if total := p.tokens + outputTokens; total > e.opts.Cost.MaxModelLen {
+		openai.WriteError(w, http.StatusBadRequest, openai.ErrTypeInvalidRequest,
+			fmt.Sprintf("prompt (%d tokens) plus output (%d tokens) exceeds the maximum context length of %d tokens",
+				p.tokens, outputTokens, e.opts.Cost.MaxModelLen))
+		return
 	}
 
-	e.active.Add(1)
-	defer e.active.Add(-1)
+	seq := newSequence(p, outputTokens)
+	if need := len(p.blocks) + seq.privateBlocks(e.opts.Cost.BlockTokens); need > e.opts.Cost.CapacityBlocks {
+		openai.WriteError(w, http.StatusBadRequest, openai.ErrTypeInvalidRequest,
+			fmt.Sprintf("request needs %d KV cache blocks; capacity is %d", need, e.opts.Cost.CapacityBlocks))
+		return
+	}
+	e.sched.submit(seq)
 
 	gen := generation{
 		id:           "sim-" + strconv.FormatInt(time.Now().UnixNano(), 36),
 		model:        e.opts.Model,
 		chat:         chat,
-		tokens:       tokens,
-		promptTokens: len(body) / bytesPerToken,
+		tokens:       outputTokens,
+		promptTokens: p.tokens,
 	}
-	var ok bool
+	var outcome seqEvent
 	if fields.Stream {
-		ok = e.stream(r.Context(), w, gen, fields.WantsUsage())
+		outcome = e.stream(r.Context(), w, seq, gen, fields.WantsUsage())
 	} else {
-		ok = e.respond(r.Context(), w, gen)
+		outcome = e.respond(r.Context(), w, seq, gen)
 	}
-	if ok {
+	switch outcome {
+	case eventDone:
 		e.completed.Add(1)
-	} else {
+	case eventAborted:
+		// Engine shutdown; nothing to count.
+	default:
+		seq.cancelled.Store(true)
+		e.sched.notify()
 		e.cancelled.Add(1)
 	}
 }
 
-// respond waits for the whole generation, then writes one JSON response. It
-// returns false if the client went away first.
-func (e *Engine) respond(ctx context.Context, w http.ResponseWriter, gen generation) bool {
-	if !sleep(ctx, e.opts.FirstTokenDelay+time.Duration(gen.tokens-1)*e.opts.TokenInterval) {
-		return false
+// await returns the sequence's next event, or eventCancelled if the client
+// goes away first.
+func await(ctx context.Context, seq *sequence) seqEvent {
+	select {
+	case ev := <-seq.events:
+		return ev
+	case <-ctx.Done():
+		return eventCancelled
 	}
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(gen.response())
-	return true
+}
+
+// respond waits for the whole generation, then writes one JSON response.
+func (e *Engine) respond(ctx context.Context, w http.ResponseWriter, seq *sequence, gen generation) seqEvent {
+	for {
+		switch ev := await(ctx, seq); ev {
+		case eventToken:
+			continue
+		case eventDone:
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(gen.response())
+			return eventDone
+		case eventAborted:
+			openai.WriteError(w, http.StatusServiceUnavailable, openai.ErrTypeUnavailable, "engine shutting down")
+			return ev
+		default:
+			return ev
+		}
+	}
 }
 
 // stream writes the generation as server-sent events, one token per event.
-// It returns false if the client went away first.
-func (e *Engine) stream(ctx context.Context, w http.ResponseWriter, gen generation, withUsage bool) bool {
+func (e *Engine) stream(ctx context.Context, w http.ResponseWriter, seq *sequence, gen generation, withUsage bool) seqEvent {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	rc := http.NewResponseController(w)
@@ -144,22 +229,26 @@ func (e *Engine) stream(ctx context.Context, w http.ResponseWriter, gen generati
 	}
 
 	if gen.chat && !send(gen.roleChunk()) {
-		return false
+		return eventCancelled
 	}
-	delay := e.opts.FirstTokenDelay
-	for i := range gen.tokens {
-		if !sleep(ctx, delay) || !send(gen.tokenChunk(i)) {
-			return false
+	for i := 0; ; i++ {
+		switch ev := await(ctx, seq); ev {
+		case eventToken:
+			if !send(gen.tokenChunk(i)) {
+				return eventCancelled
+			}
+		case eventDone:
+			if !send(gen.finishChunk()) || (withUsage && !send(gen.usageChunk())) {
+				return eventCancelled
+			}
+			if openai.WriteEvent(w, []byte("[DONE]")) != nil || rc.Flush() != nil {
+				return eventCancelled
+			}
+			return eventDone
+		default:
+			return ev
 		}
-		delay = e.opts.TokenInterval
 	}
-	if !send(gen.finishChunk()) {
-		return false
-	}
-	if withUsage && !send(gen.usageChunk()) {
-		return false
-	}
-	return openai.WriteEvent(w, []byte("[DONE]")) == nil && rc.Flush() == nil
 }
 
 func (e *Engine) handleModels(w http.ResponseWriter, _ *http.Request) {

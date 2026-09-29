@@ -1,9 +1,9 @@
 // Command simengine runs a simulated OpenAI-compatible model server for
-// testing Switchyard without a GPU.
+// testing and experimenting with Switchyard without a GPU.
 //
 // Usage:
 //
-//	simengine -listen :9001 -first-token-delay 50ms -token-interval 10ms
+//	simengine -listen :9001 -capacity-blocks 2340 -prefill-rate 14000
 package main
 
 import (
@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
@@ -30,11 +31,18 @@ func main() {
 }
 
 func run() error {
+	d := sim.DefaultCostModel()
 	listen := flag.String("listen", ":9001", "listen address")
 	model := flag.String("model", "sim-model", "model name to serve")
-	firstToken := flag.Duration("first-token-delay", 50*time.Millisecond, "time to the first generated token")
-	interval := flag.Duration("token-interval", 10*time.Millisecond, "time between generated tokens")
 	outputTokens := flag.Int("output-tokens", 16, "tokens generated when a request sets no limit")
+	blockTokens := flag.Int("block-tokens", d.BlockTokens, "tokens per KV cache block")
+	capacity := flag.Int("capacity-blocks", d.CapacityBlocks, "KV cache capacity in blocks")
+	prefillRate := flag.Float64("prefill-rate", d.PrefillTokensPerSecond, "prompt tokens processed per second")
+	step := flag.Duration("step", d.StepOverhead, "fixed duration of one engine step")
+	decodeCost := flag.Duration("decode-cost", d.DecodeCostPerSequence, "added step time per decoding sequence")
+	batchTokens := flag.Int("max-batch-tokens", d.MaxBatchTokens, "prefill token budget per step")
+	maxRunning := flag.Int("max-running", d.MaxRunning, "maximum concurrently running sequences")
+	maxModelLen := flag.Int("max-model-len", d.MaxModelLen, "maximum prompt plus output tokens")
 	flag.Parse()
 
 	logger, err := telemetry.NewLogger(os.Stdout, "info")
@@ -42,23 +50,42 @@ func run() error {
 		return err
 	}
 	engine := sim.NewEngine(sim.Options{
-		Model:               *model,
-		FirstTokenDelay:     *firstToken,
-		TokenInterval:       *interval,
+		Model: *model,
+		Cost: sim.CostModel{
+			BlockTokens:            *blockTokens,
+			CapacityBlocks:         *capacity,
+			PrefillTokensPerSecond: *prefillRate,
+			StepOverhead:           *step,
+			DecodeCostPerSequence:  *decodeCost,
+			MaxBatchTokens:         *batchTokens,
+			MaxRunning:             *maxRunning,
+			MaxModelLen:            *maxModelLen,
+		},
 		DefaultOutputTokens: *outputTokens,
 	})
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	var wg sync.WaitGroup
+	engineCtx, stopEngine := context.WithCancel(context.Background())
+	defer func() {
+		stopEngine()
+		wg.Wait()
+	}()
+	wg.Go(func() { engine.Run(engineCtx) })
+
 	httpServer := &http.Server{
 		Addr:              *listen,
 		Handler:           engine.Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 		ErrorLog:          slog.NewLogLogger(logger.Handler(), slog.LevelWarn),
 	}
-
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- httpServer.ListenAndServe() }()
-	logger.Info("simengine started", slog.String("listen", *listen), slog.String("model", *model))
+	logger.Info("simengine started",
+		slog.String("listen", *listen),
+		slog.String("model", *model),
+		slog.Int("capacity_blocks", *capacity))
 
 	select {
 	case err := <-serveErr:

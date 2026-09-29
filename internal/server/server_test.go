@@ -19,6 +19,7 @@ import (
 	"github.com/shusingh/switchyard/internal/proxy"
 	"github.com/shusingh/switchyard/internal/scheduler"
 	"github.com/shusingh/switchyard/internal/sim"
+	"github.com/shusingh/switchyard/internal/sim/simtest"
 )
 
 func TestMain(m *testing.M) {
@@ -50,10 +51,8 @@ func newHarness(t *testing.T, opts harnessOptions) *harness {
 		if eo.Model == "" {
 			eo.Model = testModel
 		}
-		engine := sim.NewEngine(eo)
-		srv := httptest.NewServer(engine.Handler())
-		t.Cleanup(srv.Close)
-		h.engines = append(h.engines, engine)
+		srv := simtest.Start(t, eo)
+		h.engines = append(h.engines, srv.Engine)
 		backends = append(backends, config.Backend{ID: string(rune('a' + i)), URL: srv.URL})
 	}
 	pool, err := backend.NewPool(backends)
@@ -121,7 +120,7 @@ func decodeError(t *testing.T, resp *http.Response) openai.ErrorBody {
 func fastEngines(n int) []sim.Options {
 	opts := make([]sim.Options, n)
 	for i := range opts {
-		opts[i] = sim.Options{FirstTokenDelay: time.Millisecond, TokenInterval: time.Millisecond, DefaultOutputTokens: 4}
+		opts[i] = sim.Options{Cost: simtest.FastCost(), DefaultOutputTokens: 4}
 	}
 	return opts
 }
@@ -187,9 +186,9 @@ func TestStreamingThroughRouter(t *testing.T) {
 
 func TestClientDisconnectCancelsBackend(t *testing.T) {
 	t.Parallel()
-	h := newHarness(t, harnessOptions{engines: []sim.Options{{
-		FirstTokenDelay: time.Millisecond, TokenInterval: 50 * time.Millisecond, DefaultOutputTokens: 1000,
-	}}})
+	slow := simtest.FastCost()
+	slow.StepOverhead = 50 * time.Millisecond // one token every 50ms
+	h := newHarness(t, harnessOptions{engines: []sim.Options{{Cost: slow, DefaultOutputTokens: 1000}}})
 	ctx, cancel := context.WithCancel(context.Background())
 	resp := h.post(t, ctx, openai.PathChatCompletions, `{"model":"sim-model","stream":true}`)
 	defer resp.Body.Close()
