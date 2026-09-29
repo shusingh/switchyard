@@ -161,6 +161,28 @@ The cache hit rate is vLLM's own counter. No request failed.
   feeds, not in index accuracy; it inherits the estimated_ttft behavior
   above.
 
+### GPU, agent workload across load levels
+
+`scripts/bench-gpu.sh bench/results/gpu-agent-rate-RATE "round_robin prefix_affinity" 3 -workload agent -duration 5m -rate RATE`
+for RATE 0.25 and 0.75; the 0.5 row is the run above. Three trials each,
+medians.
+
+| Sessions/s | Policy | Cache hit rate | TTFT p50 | TTFT p99 | Goodput (TTFT <= 2 s) |
+|---:|---|---:|---:|---:|---:|
+| 0.25 | round_robin | 46.1% | 509 ms | 1.83 s | 99.3% |
+| 0.25 | prefix_affinity | 89.7% | 144 ms | 615 ms | 100.0% |
+| 0.5 | round_robin | 32.7% | 3.91 s | 23.58 s | 37.0% |
+| 0.5 | prefix_affinity | 81.7% | 241 ms | 4.43 s | 92.6% |
+| 0.75 | round_robin | 31.3% | 20.62 s | 42.80 s | 15.1% |
+| 0.75 | prefix_affinity | 59.1% | 8.13 s | 22.36 s | 28.6% |
+
+prefix_affinity leads at every load. At light load both policies meet the
+2 s target and the gain is latency (TTFT p50 3.5 times lower). In the middle
+the cache is what keeps the pool out of overload. At 0.75 sessions per
+second the shared GPU is saturated under both policies; prefix_affinity
+still halves p50 and p99, but neither setup can serve that rate within the
+target.
+
 ### GPU, Mooncake tool-agent trace
 
 `scripts/bench-gpu.sh bench/results/gpu-mooncake "round_robin least_loaded prefix_affinity estimated_ttft" 3 -workload mooncake -time-scale 4 -trace-duration 2m -max-prompt-tokens 15000 -max-output-tokens 64`

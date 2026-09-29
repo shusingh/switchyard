@@ -1,0 +1,27 @@
+{
+  "label": "prefix_affinity (trial 3)",
+  "workload": "agent",
+  "parameters": {
+    "backends": "http://localhost:8001,http://localhost:8002,http://localhost:8003,http://localhost:8004",
+    "duration": "5m0s",
+    "label": "prefix_affinity (trial 3)",
+    "model": "Qwen/Qwen2.5-1.5B-Instruct",
+    "out": "bench/results/gpu-agent-rate-0.25/prefix_affinity-trial3.jsonl",
+    "rate": "0.25",
+    "reset-caches": "true",
+    "url": "http://localhost:8090",
+    "workload": "agent"
+  },
+  "requests": 761,
+  "started": "2026-09-29T15:09:01.3103945-07:00",
+  "finished": "2026-09-29T15:15:35.6049764-07:00",
+  "cache_before": {
+    "queries": 421044609,
+    "hits": 241158720
+  },
+  "cache_after": {
+    "queries": 426272626,
+    "hits": 245807072
+  },
+  "cache_hit_rate": 0.8891233521237594
+}
