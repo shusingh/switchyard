@@ -161,6 +161,35 @@ The cache hit rate is vLLM's own counter. No request failed.
   feeds, not in index accuracy; it inherits the estimated_ttft behavior
   above.
 
+### GPU, Mooncake tool-agent trace
+
+`scripts/bench-gpu.sh bench/results/gpu-mooncake "round_robin least_loaded prefix_affinity estimated_ttft" 3 -workload mooncake -time-scale 4 -trace-duration 2m -max-prompt-tokens 15000 -max-output-tokens 64`
+
+The first two minutes of the trace, stretched four times (548 requests over
+8 minutes), outputs capped at 64 tokens. 95 prompts over 15,000 tokens were
+dropped. Three trials, medians.
+
+| Policy | Cache hit rate | TTFT p50 | TTFT p99 | Goodput (TTFT <= 2 s) |
+|---|---:|---:|---:|---:|
+| round_robin | 52.8% | 917 ms | 4.31 s | 80.3% |
+| least_loaded | 52.5% | 979 ms | 4.08 s | 79.4% |
+| prefix_affinity | 56.2% | 756 ms | 3.55 s | 84.9% |
+| estimated_ttft | 55.3% | 873 ms | 3.80 s | 83.9% |
+
+The gaps are small because most of this trace's reuse comes from prefixes
+shared by nearly every request, which any policy's replicas soon cache;
+per-session reuse, where routing matters, is a smaller share than in the
+agent workload. prefix_affinity is still best on every column, with TTFT
+p50 18% lower than round_robin's.
+
+### Router accuracy
+
+Across every approximate-mode GPU run above, the router's believed cache hit
+rate (from its prefix index) is 0 to 1.0 point above vLLM's measured rate,
+so index drift is not a factor in these results. Precise mode, fed by vLLM's
+own KV events, came out 2.1 points below the measured rate, erring on the
+side of predicting misses.
+
 ### Hot prefix
 
 Two system prompts with Zipf skew 4, so one prompt dominates, at 1.0

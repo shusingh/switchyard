@@ -1,0 +1,35 @@
+{
+  "label": "estimated_ttft (trial 2)",
+  "workload": "mooncake",
+  "parameters": {
+    "backends": "http://localhost:8001,http://localhost:8002,http://localhost:8003,http://localhost:8004",
+    "label": "estimated_ttft (trial 2)",
+    "max-output-tokens": "64",
+    "max-prompt-tokens": "15000",
+    "model": "Qwen/Qwen2.5-1.5B-Instruct",
+    "out": "bench/results/gpu-mooncake/estimated_ttft-trial2.jsonl",
+    "reset-caches": "true",
+    "time-scale": "4",
+    "trace-duration": "2m0s",
+    "url": "http://localhost:8090",
+    "workload": "mooncake"
+  },
+  "requests": 548,
+  "started": "2026-09-29T13:55:59.7219453-07:00",
+  "finished": "2026-09-29T14:03:49.8279974-07:00",
+  "cache_before": {
+    "queries": 378914244,
+    "hits": 215781712
+  },
+  "cache_after": {
+    "queries": 382112300,
+    "hits": 217548496
+  },
+  "cache_hit_rate": 0.5524556167871982,
+  "mooncake": {
+    "Read": 23608,
+    "Kept": 548,
+    "TooLong": 95,
+    "OutsideWin": 22965
+  }
+}

@@ -1,0 +1,35 @@
+{
+  "label": "round_robin (trial 1)",
+  "workload": "mooncake",
+  "parameters": {
+    "backends": "http://localhost:8001,http://localhost:8002,http://localhost:8003,http://localhost:8004",
+    "label": "round_robin (trial 1)",
+    "max-output-tokens": "64",
+    "max-prompt-tokens": "15000",
+    "model": "Qwen/Qwen2.5-1.5B-Instruct",
+    "out": "bench/results/gpu-mooncake/round_robin-trial1.jsonl",
+    "reset-caches": "true",
+    "time-scale": "4",
+    "trace-duration": "2m0s",
+    "url": "http://localhost:8090",
+    "workload": "mooncake"
+  },
+  "requests": 548,
+  "started": "2026-09-29T13:01:06.5502036-07:00",
+  "finished": "2026-09-29T13:08:57.0287787-07:00",
+  "cache_before": {
+    "queries": 356527852,
+    "hits": 203695520
+  },
+  "cache_after": {
+    "queries": 359725908,
+    "hits": 205383968
+  },
+  "cache_hit_rate": 0.5279607361472094,
+  "mooncake": {
+    "Read": 23608,
+    "Kept": 548,
+    "TooLong": 95,
+    "OutsideWin": 22965
+  }
+}
