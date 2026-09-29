@@ -1,0 +1,29 @@
+{
+  "label": "least_loaded (trial 1)",
+  "workload": "agent",
+  "parameters": {
+    "app-skew": "4",
+    "apps": "2",
+    "backends": "http://localhost:8001,http://localhost:8002,http://localhost:8003,http://localhost:8004",
+    "duration": "5m0s",
+    "label": "least_loaded (trial 1)",
+    "model": "Qwen/Qwen2.5-1.5B-Instruct",
+    "out": "bench/results/gpu-hot-prefix/least_loaded-trial1.jsonl",
+    "rate": "1",
+    "reset-caches": "true",
+    "url": "http://localhost:8090",
+    "workload": "agent"
+  },
+  "requests": 3030,
+  "started": "2026-09-29T10:36:39.3012572-07:00",
+  "finished": "2026-09-29T10:48:17.5085632-07:00",
+  "cache_before": {
+    "queries": 168620237,
+    "hits": 89120128
+  },
+  "cache_after": {
+    "queries": 189322950,
+    "hits": 101190208
+  },
+  "cache_hit_rate": 0.5830192400387331
+}
