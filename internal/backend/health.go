@@ -40,6 +40,10 @@ func NewHealthChecker(pool *Pool, cfg config.Health, logger *slog.Logger) *Healt
 	}
 }
 
+// CloseIdleConnections closes idle probe connections. It is called on
+// shutdown so no connection outlives the checker.
+func (h *HealthChecker) CloseIdleConnections() { h.client.CloseIdleConnections() }
+
 // Run checks every backend once per interval until ctx is cancelled.
 func (h *HealthChecker) Run(ctx context.Context) {
 	ticker := time.NewTicker(h.cfg.Interval)

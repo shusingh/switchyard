@@ -73,6 +73,10 @@ func New(cfg config.Proxy) *Proxy {
 	}
 }
 
+// CloseIdleConnections closes idle upstream connections. It is called on
+// shutdown so no connection outlives the proxy.
+func (p *Proxy) CloseIdleConnections() { p.client.CloseIdleConnections() }
+
 // Result describes one forwarded request.
 type Result struct {
 	// Status is the backend's response status, or 0 if none arrived.

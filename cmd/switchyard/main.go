@@ -1,0 +1,117 @@
+// Command switchyard runs the prefix-cache-aware router in front of a pool of
+// OpenAI-compatible model servers.
+//
+// Usage:
+//
+//	switchyard -config switchyard.yaml
+package main
+
+import (
+	"context"
+	"errors"
+	"flag"
+	"fmt"
+	"log/slog"
+	"net/http"
+	"os"
+	"os/signal"
+	"sync"
+	"syscall"
+
+	"github.com/shusingh/switchyard/internal/backend"
+	"github.com/shusingh/switchyard/internal/config"
+	"github.com/shusingh/switchyard/internal/proxy"
+	"github.com/shusingh/switchyard/internal/scheduler"
+	"github.com/shusingh/switchyard/internal/server"
+	"github.com/shusingh/switchyard/internal/telemetry"
+)
+
+func main() {
+	if err := run(); err != nil {
+		fmt.Fprintln(os.Stderr, "switchyard:", err)
+		os.Exit(1)
+	}
+}
+
+func run() error {
+	configPath := flag.String("config", "switchyard.yaml", "path to the YAML configuration file")
+	listen := flag.String("listen", "", "listen address; overrides server.listen in the config file")
+	flag.Parse()
+
+	cfg, err := config.Load(*configPath)
+	if err != nil {
+		return err
+	}
+	if *listen != "" {
+		cfg.Server.Listen = *listen
+	}
+	logger, err := telemetry.NewLogger(os.Stdout, cfg.Log.Level)
+	if err != nil {
+		return err
+	}
+	policy, err := scheduler.New(cfg.Routing.Policy)
+	if err != nil {
+		return err
+	}
+	pool, err := backend.NewPool(cfg.Backends)
+	if err != nil {
+		return err
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	// Health checks keep running while in-flight requests drain after a
+	// shutdown signal, so they get their own lifetime.
+	healthCtx, stopHealth := context.WithCancel(context.Background())
+	var wg sync.WaitGroup
+	defer func() {
+		stopHealth()
+		wg.Wait()
+	}()
+	checker := backend.NewHealthChecker(pool, cfg.Health, logger)
+	checker.CheckAll(ctx) // serve immediately if backends are already up
+	wg.Go(func() { checker.Run(healthCtx) })
+
+	srv := server.New(server.Options{
+		Pool:            pool,
+		Policy:          policy,
+		Proxy:           proxy.New(cfg.Proxy),
+		Logger:          logger,
+		MaxRequestBytes: cfg.Server.MaxRequestBytes,
+	})
+	httpServer := &http.Server{
+		Addr:              cfg.Server.Listen,
+		Handler:           srv.Handler(),
+		ReadHeaderTimeout: cfg.Server.ReadHeaderTimeout,
+		IdleTimeout:       cfg.Server.IdleTimeout,
+		ErrorLog:          slog.NewLogLogger(logger.Handler(), slog.LevelWarn),
+	}
+
+	serveErr := make(chan error, 1)
+	go func() { serveErr <- httpServer.ListenAndServe() }()
+	logger.Info("switchyard started",
+		slog.String("listen", cfg.Server.Listen),
+		slog.String("policy", policy.Name()),
+		slog.Int("backends", len(cfg.Backends)))
+
+	select {
+	case err := <-serveErr:
+		return fmt.Errorf("serve: %w", err)
+	case <-ctx.Done():
+	}
+
+	logger.Info("shutting down", slog.Duration("drain_timeout", cfg.Server.ShutdownTimeout))
+	drainCtx, cancel := context.WithTimeout(context.Background(), cfg.Server.ShutdownTimeout)
+	defer cancel()
+	if err := httpServer.Shutdown(drainCtx); err != nil {
+		// Requests still running after the drain timeout are cut off.
+		logger.Warn("drain timeout exceeded; closing remaining connections", slog.String("error", err.Error()))
+		_ = httpServer.Close()
+	}
+	if err := <-serveErr; !errors.Is(err, http.ErrServerClosed) {
+		return fmt.Errorf("serve: %w", err)
+	}
+	logger.Info("switchyard stopped")
+	return nil
+}
