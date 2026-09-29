@@ -68,6 +68,51 @@ func TestRoundRobinIsEven(t *testing.T) {
 	}
 }
 
+func TestLeastLoadedPicksIdlestAndSpreadsTies(t *testing.T) {
+	t.Parallel()
+	candidates := newCandidates(t, 3)
+	candidates[0].BeginRequest()
+	candidates[0].BeginRequest()
+	candidates[1].BeginRequest()
+	p, _ := New(PolicyLeastLoaded)
+	b, _ := p.Pick(&Request{}, candidates)
+	if b != candidates[2] {
+		t.Fatalf("least_loaded picked %s, want the idle backend b2", b.ID())
+	}
+
+	candidates[2].BeginRequest() // now b1 and b2 tie at one request each
+	seen := map[string]bool{}
+	for range 200 {
+		b, _ := p.Pick(&Request{}, candidates)
+		if b == candidates[0] {
+			t.Fatal("least_loaded picked the busiest backend")
+		}
+		seen[b.ID()] = true
+	}
+	if len(seen) != 2 {
+		t.Errorf("least_loaded used %d of 2 tied backends; ties should be spread", len(seen))
+	}
+}
+
+func TestP2CNeverPicksTheBusierOfTwo(t *testing.T) {
+	t.Parallel()
+	candidates := newCandidates(t, 2)
+	for range 5 {
+		candidates[0].BeginRequest()
+	}
+	p, _ := New(PolicyP2C)
+	for range 100 {
+		// With two candidates both are always sampled, so the idle one wins.
+		if b, _ := p.Pick(&Request{}, candidates); b != candidates[1] {
+			t.Fatalf("p2c picked the busier backend %s", b.ID())
+		}
+	}
+	single := candidates[:1]
+	if b, _ := p.Pick(&Request{}, single); b != single[0] {
+		t.Error("p2c with one candidate did not pick it")
+	}
+}
+
 func TestRandomOnlyPicksCandidates(t *testing.T) {
 	t.Parallel()
 	candidates := newCandidates(t, 3)

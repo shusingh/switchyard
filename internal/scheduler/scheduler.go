@@ -17,8 +17,10 @@ import (
 
 // Policy names accepted by New.
 const (
-	PolicyRoundRobin = "round_robin"
-	PolicyRandom     = "random"
+	PolicyRoundRobin  = "round_robin"
+	PolicyRandom      = "random"
+	PolicyLeastLoaded = "least_loaded"
+	PolicyP2C         = "p2c"
 )
 
 // ErrNoCandidates is returned when there is no healthy backend to choose.
@@ -41,7 +43,7 @@ type Policy interface {
 
 // Names returns the names of all available policies, sorted.
 func Names() []string {
-	names := []string{PolicyRoundRobin, PolicyRandom}
+	names := []string{PolicyRoundRobin, PolicyRandom, PolicyLeastLoaded, PolicyP2C}
 	slices.Sort(names)
 	return names
 }
@@ -53,6 +55,10 @@ func New(name string) (Policy, error) {
 		return &roundRobin{}, nil
 	case PolicyRandom:
 		return randomPolicy{}, nil
+	case PolicyLeastLoaded:
+		return leastLoaded{}, nil
+	case PolicyP2C:
+		return p2c{}, nil
 	default:
 		return nil, fmt.Errorf("unknown routing policy %q (valid: %v)", name, Names())
 	}
