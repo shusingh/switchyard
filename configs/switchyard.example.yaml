@@ -51,9 +51,10 @@ proxy:
 
 routing:
   # One of: estimated_ttft, least_loaded, p2c, prefix_affinity, random,
-  # round_robin. estimated_ttft is Switchyard's cache- and load-aware policy;
-  # the others are baselines for comparison.
-  policy: round_robin
+  # round_robin. prefix_affinity, the default, measured best on replicas
+  # sharing one GPU; estimated_ttft also weighs queueing and suits replicas
+  # with accelerators of their own (docs/adr/0012). The rest are baselines.
+  policy: prefix_affinity
 
   # Prefix tracking (docs/engineering/design.md sections 6 and 7). The router
   # maintains it under every policy, so overhead is equal across policies.

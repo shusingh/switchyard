@@ -30,7 +30,7 @@ func TestParseAppliesDefaults(t *testing.T) {
 		{"health.path", cfg.Health.Path, "/health"},
 		{"health.interval", cfg.Health.Interval, 2 * time.Second},
 		{"proxy.stream_idle_timeout", cfg.Proxy.StreamIdleTimeout, 60 * time.Second},
-		{"routing.policy", cfg.Routing.Policy, "round_robin"},
+		{"routing.policy", cfg.Routing.Policy, "prefix_affinity"},
 		{"log.level", cfg.Log.Level, "info"},
 	}
 	for _, c := range checks {

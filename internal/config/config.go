@@ -277,7 +277,7 @@ func (c *Config) ApplyDefaults() {
 	setDefault(&c.Proxy.BreakerFailures, 5)
 	setDefault(&c.Proxy.BreakerCooldown, 30*time.Second)
 
-	setDefault(&c.Routing.Policy, "round_robin")
+	setDefault(&c.Routing.Policy, "prefix_affinity")
 	setDefault(&c.Routing.BlockBytes, 128)
 	setDefault(&c.Routing.MaxBlocks, 4096)
 	setDefault(&c.Routing.IndexTTL, 10*time.Minute)

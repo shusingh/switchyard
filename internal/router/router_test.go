@@ -147,7 +147,7 @@ func TestMetricsEndpoint(t *testing.T) {
 	defer metrics.Body.Close()
 	body, _ := io.ReadAll(metrics.Body)
 	for _, want := range []string{
-		`switchyard_requests_total{backend="sim",code="200",policy="round_robin"} 1`,
+		`switchyard_requests_total{backend="sim",code="200",policy="prefix_affinity"} 1`,
 		"switchyard_ttft_seconds_count",
 		"switchyard_route_decision_seconds_count",
 		`switchyard_backend_healthy{backend="sim"} 1`,

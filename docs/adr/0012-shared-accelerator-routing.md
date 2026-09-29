@@ -39,6 +39,8 @@ every replica its own compute; the GPU replicas time-share one device.
 
 - The simulator can now show policy behavior on shared accelerators, and
   results from it are labeled as such.
+- `routing.policy` now defaults to prefix_affinity, the best measured policy
+  on the reference GPU setup, instead of round_robin.
 - estimated_ttft's advantage, spreading a hot prefix across replicas when its
   owner is overloaded, holds where replicas have their own compute. On a
   shared accelerator, spreading buys no extra compute and costs cache hits;
