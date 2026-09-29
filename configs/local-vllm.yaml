@@ -1,0 +1,12 @@
+# Routes to the four local vLLM replicas started by `make vllm-up`
+# (see deploy/vllm/README.md). All other settings use their defaults.
+
+backends:
+  - id: vllm-0
+    url: http://localhost:8001
+  - id: vllm-1
+    url: http://localhost:8002
+  - id: vllm-2
+    url: http://localhost:8003
+  - id: vllm-3
+    url: http://localhost:8004

@@ -470,16 +470,20 @@ All policies implement one interface and run through the same pipeline, so
 baselines are fair.
 
 ```go
-// Policy chooses a backend for a request from the healthy candidates.
+// Policy chooses a backend for a request. Implementations must be safe for
+// concurrent use and must not block: Pick runs on every request's hot path.
 type Policy interface {
     Name() string
-    Pick(ctx context.Context, req *Request, candidates []Candidate) (Decision, error)
+    Pick(req *Request, candidates []*backend.Backend) (*backend.Backend, error)
 }
 ```
 
-`Candidate` carries the backend's live load snapshot and its matched prefix
-length for this request. `Decision` carries the pick plus a per-candidate
-explanation.
+`Pick` takes no context because it does no I/O; everything it needs is in
+memory. As of Phase 1, `Request` carries the model name and candidates are the
+healthy backends. Phases 3 and 4 extend `Request` with the prompt's block
+hashes and token estimate, and give policies read access to the prefix index
+and load tracker; a per-candidate explanation is returned alongside the pick
+for the explain headers (section 13).
 
 | Policy | Purpose |
 |---|---|

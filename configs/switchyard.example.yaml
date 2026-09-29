@@ -1,0 +1,49 @@
+# Switchyard configuration reference.
+#
+# Every field is optional except `backends`; the values shown are the
+# defaults. Durations use Go syntax ("250ms", "2s", "10m"). Unknown fields are
+# rejected at startup, so a typo fails loudly instead of being ignored.
+
+server:
+  listen: ":8080"
+  read_header_timeout: 10s
+  idle_timeout: 120s
+  # Long agent prompts with tool definitions can reach several megabytes.
+  max_request_bytes: 16777216
+  # How long in-flight requests may finish after SIGTERM before they are cut.
+  shutdown_timeout: 30s
+
+# The model servers to route to. Each needs a unique id and a base URL
+# without the /v1 path.
+backends:
+  - id: vllm-0
+    url: http://localhost:8001
+  - id: vllm-1
+    url: http://localhost:8002
+
+health:
+  path: /health
+  interval: 2s
+  timeout: 1s
+  # Consecutive failures before a healthy backend stops receiving traffic.
+  unhealthy_threshold: 3
+  # Consecutive successes before an unhealthy backend receives traffic again.
+  # The first successful check after startup marks a backend healthy at once.
+  healthy_threshold: 2
+
+proxy:
+  dial_timeout: 2s
+  # Non-streaming completions send headers only when generation finishes, so
+  # this must exceed the longest expected generation.
+  response_header_timeout: 10m
+  # A stream that produces no event for this long is aborted.
+  stream_idle_timeout: 60s
+  max_idle_conns_per_host: 256
+
+routing:
+  # One of: random, round_robin.
+  policy: round_robin
+
+log:
+  # One of: debug, info, warn, error.
+  level: info
