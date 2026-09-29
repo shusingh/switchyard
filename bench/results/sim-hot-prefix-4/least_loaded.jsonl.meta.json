@@ -1,0 +1,28 @@
+{
+  "label": "least_loaded (4 replicas, simulated)",
+  "workload": "agent",
+  "parameters": {
+    "app-skew": "4",
+    "apps": "2",
+    "backends": "http://localhost:9001,http://localhost:9002,http://localhost:9003,http://localhost:9004",
+    "duration": "5m0s",
+    "label": "least_loaded (4 replicas, simulated)",
+    "model": "sim-model",
+    "out": "bench/results/sim-hot-prefix-4/least_loaded.jsonl",
+    "rate": "1",
+    "url": "http://localhost:8080",
+    "workload": "agent"
+  },
+  "requests": 3030,
+  "started": "2026-09-29T08:03:09.2603947-07:00",
+  "finished": "2026-09-29T08:10:47.1538558-07:00",
+  "cache_before": {
+    "queries": 0,
+    "hits": 0
+  },
+  "cache_after": {
+    "queries": 20676832,
+    "hits": 13472800
+  },
+  "cache_hit_rate": 0.6515891796190054
+}

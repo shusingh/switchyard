@@ -1,0 +1,28 @@
+{
+  "label": "estimated_ttft (4 replicas, simulated)",
+  "workload": "agent",
+  "parameters": {
+    "app-skew": "4",
+    "apps": "2",
+    "backends": "http://localhost:9001,http://localhost:9002,http://localhost:9003,http://localhost:9004",
+    "duration": "5m0s",
+    "label": "estimated_ttft (4 replicas, simulated)",
+    "model": "sim-model",
+    "out": "bench/results/sim-hot-prefix-4/estimated_ttft.jsonl",
+    "rate": "1",
+    "url": "http://localhost:8080",
+    "workload": "agent"
+  },
+  "requests": 3030,
+  "started": "2026-09-29T08:24:31.44777-07:00",
+  "finished": "2026-09-29T08:32:06.0741449-07:00",
+  "cache_before": {
+    "queries": 0,
+    "hits": 0
+  },
+  "cache_after": {
+    "queries": 20676832,
+    "hits": 17599184
+  },
+  "cache_hit_rate": 0.8511547610388284
+}
