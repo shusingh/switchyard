@@ -23,6 +23,7 @@ import (
 	"github.com/shusingh/switchyard/internal/prefix"
 	"github.com/shusingh/switchyard/internal/proxy"
 	"github.com/shusingh/switchyard/internal/scheduler"
+	"github.com/shusingh/switchyard/internal/telemetry"
 )
 
 // statusClientClosedRequest is logged when the client disconnects before the
@@ -58,6 +59,8 @@ type Options struct {
 	MaxRetries int
 	// RetryBudgetRatio caps retries as a fraction of requests.
 	RetryBudgetRatio float64
+	// Metrics receives per-request measurements.
+	Metrics *telemetry.Metrics
 }
 
 // Server serves the HTTP API. It is safe for concurrent use.
@@ -75,6 +78,7 @@ type Server struct {
 	trustTenantHdr  bool
 	maxRetries      int
 	retries         *retryBudget
+	metrics         *telemetry.Metrics
 }
 
 // New returns a Server with the given dependencies.
@@ -93,6 +97,7 @@ func New(opts Options) *Server {
 		trustTenantHdr:  opts.TrustTenantHeader,
 		maxRetries:      opts.MaxRetries,
 		retries:         newRetryBudget(opts.RetryBudgetRatio),
+		metrics:         opts.Metrics,
 	}
 }
 
@@ -104,6 +109,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET "+openai.PathModels, s.handleModels)
 	mux.HandleFunc("GET /healthz", handleLiveness)
 	mux.HandleFunc("GET /readyz", s.handleReadiness)
+	mux.Handle("GET /metrics", s.metrics.Handler())
 	mux.HandleFunc("/", handleNotFound)
 	return withRequestID(withRecovery(s.logger, mux))
 }
@@ -115,11 +121,13 @@ func (s *Server) handleInference(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	parseStart := time.Now()
 	parsed, err := s.keyer.Parse(body, r.URL.Path == openai.PathChatCompletions)
 	if err != nil {
 		openai.WriteError(w, http.StatusBadRequest, openai.ErrTypeInvalidRequest, err.Error())
 		return
 	}
+	parseTime := time.Since(parseStart)
 
 	promptTokens := s.estimator.PromptTokens(parsed.CanonicalBytes)
 	grant, ok := s.admit(w, r, promptTokens+outputEstimate(parsed.Fields))
@@ -129,6 +137,7 @@ func (s *Server) handleInference(w http.ResponseWriter, r *http.Request) {
 	queueWait := time.Since(start)
 	// Route after admission, so the decision reflects load when the request
 	// actually runs rather than when it arrived.
+	routeStart := time.Now()
 	route := s.newRoute(&parsed, promptTokens)
 	a, ok := s.forward(w, r, body, &parsed, route)
 	if !ok {
@@ -160,7 +169,7 @@ func (s *Server) handleInference(w http.ResponseWriter, r *http.Request) {
 	s.logRequest(r, requestLog{
 		start: start, queueWait: queueWait, tenant: grant.Tenant(), bodyBytes: len(body),
 		parsed: &parsed, route: route, backend: a.backend, uncached: a.uncached, retries: a.retries,
-		status: status, res: &a.res, err: a.err,
+		status: status, res: &a.res, err: a.err, decision: parseTime + a.picked.Sub(routeStart),
 	})
 }
 
@@ -197,6 +206,9 @@ func (s *Server) readBody(w http.ResponseWriter, r *http.Request) ([]byte, bool)
 
 // attempt is the outcome of forwarding a request, after any retries.
 type attempt struct {
+	// picked is when the first backend was chosen, which ends the router's
+	// own decision time.
+	picked   time.Time
 	backend  *backend.Backend
 	uncached int64
 	res      proxy.Result
@@ -216,6 +228,9 @@ func (s *Server) forward(w http.ResponseWriter, r *http.Request, body []byte, pa
 		b, ok := s.pick(route, tried)
 		if !ok {
 			return a, a.backend != nil // report the last failure, if any
+		}
+		if a.picked.IsZero() {
+			a.picked = time.Now()
 		}
 		if !b.Acquire() {
 			// The breaker opened, or its one trial slot was taken, since the
@@ -244,7 +259,7 @@ func (s *Server) forward(w http.ResponseWriter, r *http.Request, body []byte, pa
 		ticket.Done()
 		b.Report(outcome(r, res, err))
 		s.learn(b, ticket, parsed, &res)
-		a = attempt{backend: b, uncached: uncached, res: res, err: err, retries: a.retries}
+		a = attempt{picked: a.picked, backend: b, uncached: uncached, res: res, err: err, retries: a.retries}
 
 		if !retryable(r, &a) || a.retries >= s.maxRetries || !s.retries.withdraw() {
 			return a, true
@@ -307,6 +322,7 @@ func (s *Server) admit(w http.ResponseWriter, r *http.Request, cost int64) (*adm
 		return grant, true
 	}
 	if reject, ok := errors.AsType[*admission.RejectError](err); ok {
+		s.metrics.Rejections.WithLabelValues(rejectionReason(reject)).Inc()
 		seconds := max(1, int(math.Ceil(reject.RetryAfter.Seconds())))
 		w.Header().Set("Retry-After", strconv.Itoa(seconds))
 		openai.WriteError(w, http.StatusTooManyRequests, openai.ErrTypeRateLimit, reject.Error())
@@ -314,6 +330,17 @@ func (s *Server) admit(w http.ResponseWriter, r *http.Request, cost int64) (*adm
 	// Otherwise the client went away while waiting; there is no one to
 	// answer.
 	return nil, false
+}
+
+func rejectionReason(e *admission.RejectError) string {
+	switch {
+	case errors.Is(e, admission.ErrRateLimited):
+		return "rate_limited"
+	case errors.Is(e, admission.ErrQueueFull):
+		return "queue_full"
+	default:
+		return "queue_timeout"
+	}
 }
 
 func bearerToken(h http.Header) string {
@@ -350,6 +377,7 @@ func (s *Server) learn(b *backend.Backend, ticket *backend.Ticket, parsed *prefi
 
 // requestLog gathers what the access log line reports about one request.
 type requestLog struct {
+	decision  time.Duration
 	retries   int
 	start     time.Time
 	queueWait time.Duration
@@ -402,6 +430,27 @@ func (s *Server) logRequest(r *http.Request, l requestLog) {
 		attrs = append(attrs, slog.String("error", l.err.Error()))
 	}
 	s.logger.LogAttrs(r.Context(), level, "request", attrs...)
+	s.observe(l)
+}
+
+// observe records one request's measurements as metrics.
+func (s *Server) observe(l requestLog) {
+	m, backendID := s.metrics, l.backend.ID()
+	m.Requests.WithLabelValues(s.policy.Name(), backendID, strconv.Itoa(l.status)).Inc()
+	m.RequestDuration.WithLabelValues(backendID).Observe(time.Since(l.start).Seconds())
+	m.QueueWait.Observe(l.queueWait.Seconds())
+	m.RouteDecision.Observe(l.decision.Seconds())
+	m.Retries.Add(float64(l.retries))
+	if l.route.Blocks > 0 {
+		m.PrefixMatchRatio.Observe(float64(l.route.MatchedOn(l.backend)) / float64(l.route.Blocks))
+	}
+	if first := l.res.FirstToken; first > 0 {
+		m.TTFT.WithLabelValues(backendID).Observe(first.Seconds())
+		m.PredictionError.Observe(math.Abs((l.route.PredictedTTFT - first).Seconds()))
+		if u := l.res.Usage; u != nil && u.CompletionTokens > 1 {
+			m.TPOT.WithLabelValues(backendID).Observe((l.res.Duration - first).Seconds() / float64(u.CompletionTokens-1))
+		}
+	}
 }
 
 // handleModels proxies the model list from one healthy backend. Every

@@ -128,3 +128,36 @@ func TestShutdownTimeoutCutsOffLongStreams(t *testing.T) {
 		t.Errorf("shutdown took %v; the 100ms drain timeout should cut the stream off", elapsed)
 	}
 }
+
+func TestMetricsEndpoint(t *testing.T) {
+	t.Parallel()
+	url, _, _ := start(t, simtest.FastCost(), time.Second)
+	resp, err := stream(url, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+
+	req, _ := http.NewRequestWithContext(context.Background(), http.MethodGet, url+"/metrics", http.NoBody)
+	metrics, err := (&http.Client{Transport: &http.Transport{DisableKeepAlives: true}}).Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer metrics.Body.Close()
+	body, _ := io.ReadAll(metrics.Body)
+	for _, want := range []string{
+		`switchyard_requests_total{backend="sim",code="200",policy="round_robin"} 1`,
+		"switchyard_ttft_seconds_count",
+		"switchyard_route_decision_seconds_count",
+		`switchyard_backend_healthy{backend="sim"} 1`,
+		`switchyard_backend_in_flight{backend="sim"} 0`,
+		"switchyard_prefix_index_entries",
+		"switchyard_admission_queued 0",
+		"go_goroutines",
+	} {
+		if !strings.Contains(string(body), want) {
+			t.Errorf("/metrics lacks %q", want)
+		}
+	}
+}

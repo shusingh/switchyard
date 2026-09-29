@@ -20,6 +20,7 @@ import (
 	"github.com/shusingh/switchyard/internal/proxy"
 	"github.com/shusingh/switchyard/internal/scheduler"
 	"github.com/shusingh/switchyard/internal/server"
+	"github.com/shusingh/switchyard/internal/telemetry"
 )
 
 // Router is a configured Switchyard instance.
@@ -67,6 +68,11 @@ func New(cfg config.Config, logger *slog.Logger) (*Router, error) {
 		capacities[i] = cfg.IndexCapacityBlocks(i)
 	}
 	px := proxy.New(cfg.Proxy)
+	index := prefix.NewIndex(capacities, cfg.Routing.IndexTTL, nil)
+	metrics := telemetry.NewMetrics()
+	if err := metrics.Register(newStateCollector(pool, estimator, index, admit)); err != nil {
+		return nil, fmt.Errorf("register state metrics: %w", err)
+	}
 
 	return &Router{
 		cfg:     cfg,
@@ -80,7 +86,7 @@ func New(cfg config.Config, logger *slog.Logger) (*Router, error) {
 			Policy:            policy,
 			Proxy:             px,
 			Keyer:             prefix.NewKeyer(cfg.Routing.BlockBytes, cfg.Routing.MaxBlocks),
-			Index:             prefix.NewIndex(capacities, cfg.Routing.IndexTTL, nil),
+			Index:             index,
 			Estimator:         estimator,
 			Logger:            logger,
 			MaxRequestBytes:   cfg.Server.MaxRequestBytes,
@@ -89,6 +95,7 @@ func New(cfg config.Config, logger *slog.Logger) (*Router, error) {
 			TrustTenantHeader: cfg.Admission.TrustTenantHeader,
 			MaxRetries:        cfg.Proxy.MaxRetries,
 			RetryBudgetRatio:  cfg.Proxy.RetryBudgetRatio,
+			Metrics:           metrics,
 		}),
 	}, nil
 }

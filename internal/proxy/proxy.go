@@ -117,6 +117,8 @@ type Result struct {
 	// FirstToken is the time from forwarding to the first event carrying
 	// generated text. Zero for non-streaming responses or if no token arrived.
 	FirstToken time.Duration
+	// Duration is the time from forwarding to the end of the response.
+	Duration time.Duration
 	// Events is the number of events relayed on a streaming response.
 	Events int
 	// BytesWritten counts response body bytes delivered to the client.
@@ -175,6 +177,7 @@ func (p *Proxy) Forward(w http.ResponseWriter, r *http.Request, b *backend.Backe
 	w.WriteHeader(resp.StatusCode)
 	res.HeaderWritten = true
 
+	defer func() { res.Duration = time.Since(start) }()
 	if !res.Streamed {
 		n, err := io.Copy(w, resp.Body)
 		res.BytesWritten = n
@@ -184,6 +187,7 @@ func (p *Proxy) Forward(w http.ResponseWriter, r *http.Request, b *backend.Backe
 		return res, nil
 	}
 	err = p.relayEvents(ctx, cancel, w, resp.Body, start, opts.OnFirstToken, &res)
+	res.Duration = time.Since(start)
 	return res, err
 }
 

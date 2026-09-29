@@ -24,6 +24,7 @@ import (
 	"github.com/shusingh/switchyard/internal/scheduler"
 	"github.com/shusingh/switchyard/internal/sim"
 	"github.com/shusingh/switchyard/internal/sim/simtest"
+	"github.com/shusingh/switchyard/internal/telemetry"
 )
 
 func TestMain(m *testing.M) {
@@ -101,6 +102,7 @@ func newHarness(t *testing.T, opts harnessOptions) *harness {
 		Pool: pool, Policy: policy, Proxy: px, Keyer: testKeyer(), Index: testIndex(len(backends)), Estimator: estimatorOrDefault(opts.estimator, len(backends)),
 		Logger: slog.New(slog.DiscardHandler), MaxRequestBytes: opts.maxRequestBytes,
 		ExplainHeaders:   opts.explainHeaders,
+		Metrics:          telemetry.NewMetrics(),
 		Admission:        admissionOrDefault(t, opts.admission),
 		MaxRetries:       opts.maxRetries,
 		RetryBudgetRatio: 1,
@@ -496,8 +498,8 @@ func TestUnreachableBackendReturnsBadGateway(t *testing.T) {
 	t.Cleanup(px.CloseIdleConnections)
 	router := httptest.NewServer(New(Options{
 		Pool: pool, Policy: policy, Proxy: px, Keyer: testKeyer(), Index: testIndex(1), Estimator: testEstimator(1),
-		Admission: admissionOrDefault(t, nil),
-		Logger:    slog.New(slog.DiscardHandler), MaxRequestBytes: 1 << 20,
+		Admission: admissionOrDefault(t, nil), Metrics: telemetry.NewMetrics(),
+		Logger: slog.New(slog.DiscardHandler), MaxRequestBytes: 1 << 20,
 	}).Handler())
 	t.Cleanup(router.Close)
 
