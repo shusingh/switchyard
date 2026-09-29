@@ -311,7 +311,7 @@ too many and the signal drowns.
 
 ## 17. Review checklist (self-review before every commit)
 
-- [ ] Does it do one thing, and is that thing in plan.md?
+- [ ] Does it do one thing, and is that thing stated in the description?
 - [ ] Are errors wrapped with context and handled once?
 - [ ] Does every goroutine have an exit path tied to a context?
 - [ ] Are all HTTP bodies closed and all requests context-bound?
@@ -319,5 +319,5 @@ too many and the signal drowns.
 - [ ] Are there tests for the new behavior, including an error path?
 - [ ] Did `go vet`, `golangci-lint run`, and `go test -race ./...` pass?
 - [ ] Is anything logged that could contain prompt content? (It must not be.)
-- [ ] Are design.md, plan.md, and handoff.md updated if needed?
+- [ ] Are design.md, the ADRs, and the README updated if needed?
 - [ ] Does the commit message follow section 16?

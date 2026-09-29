@@ -12,9 +12,8 @@ On four vLLM replicas, cache-aware routing reached **2.5 times the cache hit
 rate of round-robin and cut median time to first token from 3.9 s to 241 ms**
 on an agent workload ([results](#benchmarks)).
 
-**Status:** feature-complete for its first release; GPU benchmarks recorded
-in [docs/benchmarks.md](docs/benchmarks.md). See
-[the plan](docs/engineering/plan.md).
+**Status:** first release, v0.1.0. Benchmarks, method, and commands to
+reproduce them are in [docs/benchmarks.md](docs/benchmarks.md).
 
 ## Why
 

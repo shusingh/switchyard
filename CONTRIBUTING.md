@@ -48,9 +48,9 @@ whole-system tests live in `test/e2e/`.
 | Document | Purpose |
 |---|---|
 | [Design](docs/engineering/design.md) | Architecture, algorithms, and benchmark method |
-| [Plan](docs/engineering/plan.md) | Phased roadmap and current status |
+| [Benchmarks](docs/benchmarks.md) | Method, results, and commands to reproduce them |
+| [Operations](docs/operations.md) | Running the router in front of real model servers |
 | [Coding standards](docs/engineering/coding-standards.md) | How code in this repo is written and reviewed |
-| [Handoff](docs/engineering/handoff.md) | Current state and next actions between working sessions |
 | [ADRs](docs/adr/README.md) | Architecture decisions and their rationale |
 
 ## Making a change

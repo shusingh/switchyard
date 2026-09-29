@@ -151,7 +151,7 @@ both the design and the honest framing of results.
 | **vLLM production-stack router** | Prefix-aware and KV-aware (LMCache) modes | Engine stats | Session, prefix, or KV-aware routing | Python. |
 | **Preble (ICLR 2025)** | Global radix tree | Per-GPU load | E2: exploit cached prefix when reuse is large relative to new work, otherwise explore by load | Research system; reports 1.5x to 14.5x lower average latency vs SGLang baseline. |
 
-What Switchyard does differently (the portfolio angle):
+What Switchyard does differently:
 
 1. **Routes on estimated TTFT in seconds**, a cost with physical units that can
    be calibrated and checked against measured TTFT, instead of a unitless
@@ -267,7 +267,7 @@ switchyard/
 ├── scripts/                  developer scripts (environment setup, git hooks)
 ├── docs/
 │   ├── adr/                  architecture decision records, numbered, immutable
-│   ├── engineering/          design, plan, coding standards, session handoff
+│   ├── engineering/          design and coding standards
 │   └── *.md                  user-facing docs: configuration, benchmarks, operations
 ├── .github/workflows/        CI (added with the first Go package in Phase 1)
 ├── Makefile                  the single entry point for build, test, lint, bench
