@@ -120,3 +120,43 @@ on Linux.
 
 Results are added here as they are measured, with the command that produced
 each table.
+
+### GPU, agent workload
+
+`scripts/bench-gpu.sh bench/results/gpu-agent "round_robin least_loaded prefix_affinity estimated_ttft estimated_ttft:precise" 3 -workload agent -duration 5m -rate 0.5`
+
+Four vLLM replicas of Qwen2.5-1.5B-Instruct sharing one RTX 4090, 1,657
+requests per trial, three trials per policy. Medians across trials, with the
+range in parentheses. Full table: `bench/results/gpu-agent/summary.md`.
+
+| Policy | Cache hit rate | TTFT p50 | TTFT p99 | Goodput (TTFT <= 2 s) | Output tok/s |
+|---|---:|---:|---:|---:|---:|
+| round_robin | 32.7% (32.5 to 33.1) | 3.91 s (3.86 to 4.81) | 23.58 s (19.43 to 28.18) | 37.0% | 168 |
+| least_loaded | 31.3% (31.0 to 31.8) | 6.15 s (6.06 to 6.44) | 21.52 s (19.02 to 21.60) | 30.8% | 164 |
+| prefix_affinity | 81.7% (81.6 to 82.9) | 241 ms (241 to 250) | 4.43 s (3.23 to 4.87) | 92.6% | 197 |
+| estimated_ttft | 62.7% (58.5 to 62.9) | 688 ms (647 ms to 1.17 s) | 7.64 s (7.03 to 7.73) | 64.7% | 186 |
+| estimated_ttft, precise | 56.8% (52.5 to 60.9) | 1.32 s (720 ms to 2.13 s) | 9.90 s (6.21 to 11.64) | 55.0% | 183 |
+
+The cache hit rate is vLLM's own counter. No request failed.
+
+**Findings.**
+
+- prefix_affinity against the cache-blind baselines: 2.5 times the cache hit
+  rate, TTFT p50 16 times lower than round_robin, and 2.5 times the goodput.
+  The simulator predicted the same ordering.
+- estimated_ttft, which matched prefix_affinity in simulation, falls between
+  prefix_affinity and the baselines on the GPU. It routes 39% of prompt blocks
+  away from the replica holding them (mean matched fraction 0.61 against
+  prefix_affinity's 0.83) and its TTFT predictions are wider (p10 to p90
+  signed error -0.7 s to +1.4 s against -0.5 s to +0.2 s).
+- Working hypothesis, not yet tested: the four replicas share one GPU. The
+  estimator treats replicas as independent compute, so moving a request to a
+  replica with a shorter queue looks faster; on a shared device that
+  replica's prefill competes for the same compute, so the move only adds a
+  cache miss. The simulator models independent replicas, which would explain
+  why it did not show this. Replicas on separate GPUs would not have this
+  coupling.
+- Precise mode did not help here, and its trials varied more. Its keys were
+  verified identical to vLLM's, so the gap is in the routing decisions it
+  feeds, not in index accuracy; it inherits the estimated_ttft behavior
+  above.

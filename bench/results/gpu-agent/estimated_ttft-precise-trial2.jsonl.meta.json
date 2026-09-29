@@ -1,0 +1,27 @@
+{
+  "label": "estimated_ttft-precise (trial 2)",
+  "workload": "agent",
+  "parameters": {
+    "backends": "http://localhost:8001,http://localhost:8002,http://localhost:8003,http://localhost:8004",
+    "duration": "5m0s",
+    "label": "estimated_ttft-precise (trial 2)",
+    "model": "Qwen/Qwen2.5-1.5B-Instruct",
+    "out": "bench/results/gpu-agent/estimated_ttft-precise-trial2.jsonl",
+    "rate": "0.5",
+    "reset-caches": "true",
+    "url": "http://localhost:8090",
+    "workload": "agent"
+  },
+  "requests": 1657,
+  "started": "2026-09-29T09:37:05.5171664-07:00",
+  "finished": "2026-09-29T09:46:47.5441359-07:00",
+  "cache_before": {
+    "queries": 101174165,
+    "hits": 52474048
+  },
+  "cache_after": {
+    "queries": 112415177,
+    "hits": 58857904
+  },
+  "cache_hit_rate": 0.5679075869681485
+}

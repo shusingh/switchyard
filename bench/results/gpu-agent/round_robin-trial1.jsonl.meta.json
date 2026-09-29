@@ -1,0 +1,27 @@
+{
+  "label": "round_robin (trial 1)",
+  "workload": "agent",
+  "parameters": {
+    "backends": "http://localhost:8001,http://localhost:8002,http://localhost:8003,http://localhost:8004",
+    "duration": "5m0s",
+    "label": "round_robin (trial 1)",
+    "model": "Qwen/Qwen2.5-1.5B-Instruct",
+    "out": "bench/results/gpu-agent/round_robin-trial1.jsonl",
+    "rate": "0.5",
+    "reset-caches": "true",
+    "url": "http://localhost:8090",
+    "workload": "agent"
+  },
+  "requests": 1657,
+  "started": "2026-09-29T08:06:46.5515096-07:00",
+  "finished": "2026-09-29T08:17:27.7165457-07:00",
+  "cache_before": {
+    "queries": 5057,
+    "hits": 3008
+  },
+  "cache_after": {
+    "queries": 11246069,
+    "hits": 3676176
+  },
+  "cache_hit_rate": 0.3267648855814761
+}
