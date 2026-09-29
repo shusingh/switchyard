@@ -242,15 +242,18 @@ switchyard/
 │   ├── openai/               wire types for the subset of the OpenAI API we touch,
 │   │                         error bodies, SSE event reader and writer
 │   ├── config/               config types, loading, defaults, validation
-│   ├── server/               HTTP handlers, middleware, request lifecycle
+│   ├── router/               assembles the router from config; serve and drain
+│   ├── server/               HTTP handlers, middleware, retries, request lifecycle
 │   ├── admission/            tenants, token buckets, fair queue, shedding
 │   ├── prefix/               canonicalization, block hashing, the prefix index
-│   ├── scheduler/            policies, cost model, load tracking, explanations
-│   ├── backend/              pool, health checks, circuit breakers, metrics scraper
-│   ├── proxy/                upstream transport, streaming relay, retries
-│   ├── telemetry/            Prometheus registry, logger construction, tracing
-│   ├── sim/                  engine model behind simengine (cache, latency, batching)
-│   └── workload/             trace parsers, generators, prompt synthesis
+│   ├── scheduler/            policies, TTFT estimator
+│   ├── backend/              pool, health checks, load tickets, circuit breakers
+│   ├── proxy/                upstream transport, streaming relay
+│   ├── telemetry/            logger construction (metrics in Phase 6)
+│   ├── sim/                  engine model behind simengine (cache, scheduler)
+│   │   └── simtest/          starts simulated engines in tests
+│   ├── workload/             trace parsers, generators, prompt synthesis
+│   └── loadgen/              open-loop replay, per-request records, summaries
 ├── test/
 │   └── e2e/                  black-box tests that run the real binaries
 │                             (build tag `e2e`; excluded from the default test run)
@@ -277,8 +280,8 @@ switchyard/
 
 Rules that keep the layout honest:
 
-- **Packages are created when they get code**, each with a `doc.go` package
-  comment stating its single responsibility. Empty placeholder packages are not
+- **Packages are created when they get code**, each with a package comment
+  stating its single responsibility (in `doc.go` when it is long). Empty placeholder packages are not
   committed.
 - **Tests live next to the code they test** (`foo_test.go` beside `foo.go`).
   Test fixtures live in a `testdata/` directory inside the package, which the Go
@@ -295,14 +298,14 @@ Rules that keep the layout honest:
 ### Package dependencies
 
 ```text
-cmd/switchyard ──> server ──> admission
-                     │  └───> scheduler ──> prefix
-                     │            └───────> backend
-                     └──────> proxy ─────> backend
-      (all of the above) ──> openai, config, telemetry
+cmd/switchyard ──> router ──> server ──> admission
+                                │  ├───> scheduler ──> backend
+                                │  ├───> prefix
+                                │  └───> proxy ─────> backend
+             (all of the above) ──> openai, config, telemetry
 
-cmd/simengine ──> sim ──> openai, prefix (shared canonicalization)
-cmd/loadgen   ──> workload ──> openai
+cmd/simengine ──> sim ──> openai        (deliberately not prefix: see section 14.1)
+cmd/loadgen   ──> loadgen ──> workload, openai
 ```
 
 Dependencies point one way; there are no cycles, and nothing in `internal/`
