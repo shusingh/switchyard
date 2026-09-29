@@ -66,13 +66,14 @@ func NewEngine(opts Options) *Engine {
 	return &Engine{
 		opts:      opts,
 		sched:     newScheduler(opts.Cost),
-		tokenizer: newTokenizer(opts.Cost.BlockTokens),
+		tokenizer: newTokenizer(opts.Cost.BlockTokens, opts.Cost.BytesPerToken),
 	}
 }
 
 func withDefaults(m CostModel) CostModel {
 	d := DefaultCostModel()
 	setIfZero(&m.BlockTokens, d.BlockTokens)
+	setIfZero(&m.BytesPerToken, d.BytesPerToken)
 	setIfZero(&m.CapacityBlocks, d.CapacityBlocks)
 	setIfZero(&m.PrefillTokensPerSecond, d.PrefillTokensPerSecond)
 	setIfZero(&m.StepOverhead, d.StepOverhead)

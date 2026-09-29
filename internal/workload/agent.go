@@ -41,6 +41,10 @@ type AgentConfig struct {
 	MinToolResultWords, MaxToolResultWords int
 	// OutputTokens is the number of tokens each request generates.
 	OutputTokens int
+	// MaxContextWords ends a session before a turn whose prompt would exceed
+	// it, as a real agent compacts or finishes before overflowing the
+	// model's context window. Zero means no limit.
+	MaxContextWords int
 
 	// MedianThinkTime is the typical pause between turns (tool execution).
 	// A fraction LongPauseProbability of pauses is instead drawn uniformly
@@ -70,6 +74,7 @@ func DefaultAgentConfig() AgentConfig {
 		MinToolResultWords:   100,
 		MaxToolResultWords:   800,
 		OutputTokens:         64,
+		MaxContextWords:      12000,
 		MedianThinkTime:      2 * time.Second,
 		LongPauseProbability: 0.1,
 		LongPauseMin:         20 * time.Second,
@@ -122,6 +127,9 @@ func Agent(cfg AgentConfig) (*Workload, error) {
 		turns := cfg.MinTurns + rng.IntN(cfg.MaxTurns-cfg.MinTurns+1)
 		s := Session{ID: id, Start: at, Turns: make([]Turn, 0, turns)}
 		for turn := range turns {
+			if cfg.MaxContextWords > 0 && messageWords(history) > cfg.MaxContextWords {
+				break
+			}
 			var think time.Duration
 			if turn > 0 {
 				think = thinkTime(rng, cfg)
@@ -139,9 +147,21 @@ func Agent(cfg AgentConfig) (*Workload, error) {
 				Message{Role: "user", Content: []Segment{{Seed: SeedFor(id, "result", strconv.Itoa(turn)), Words: resultWords}}},
 			)
 		}
-		w.Sessions = append(w.Sessions, s)
+		if len(s.Turns) > 0 {
+			w.Sessions = append(w.Sessions, s)
+		}
 	}
 	return w, nil
+}
+
+func messageWords(msgs []Message) int {
+	n := 0
+	for _, m := range msgs {
+		for _, s := range m.Content {
+			n += s.Words
+		}
+	}
+	return n
 }
 
 // appPicker returns a function that draws app indices, uniformly if skew is

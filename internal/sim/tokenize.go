@@ -4,15 +4,15 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"hash/maphash"
+	"math"
 )
 
-// The simulated tokenizer treats every tokenBytes bytes of rendered prompt
-// text as one token, which matches the average for English text. It is
-// deliberately independent of how the router keys prefixes: the router hashes
-// the raw request in its own block size, while the engine hashes a rendered
-// chat template in 16-token blocks, so the router's predictions meet the same
-// kind of boundary mismatch they would meet against a real engine.
-const tokenBytes = 4
+// The simulated tokenizer treats every CostModel.BytesPerToken bytes of
+// rendered prompt text as one token. It is deliberately independent of how the
+// router keys prefixes: the router hashes the raw request in its own block
+// size, while the engine hashes a rendered chat template in 16-token blocks,
+// so the router's predictions meet the same kind of boundary mismatch they
+// would meet against a real engine.
 
 // prompt is the rendered, tokenized form of a request.
 type prompt struct {
@@ -60,17 +60,18 @@ func render(req *chatRequest, chat bool) []byte {
 
 // tokenizer turns rendered text into a prompt with chained block hashes.
 type tokenizer struct {
-	seed        maphash.Seed
-	blockTokens int
+	seed          maphash.Seed
+	blockTokens   int
+	bytesPerToken float64
 }
 
-func newTokenizer(blockTokens int) *tokenizer {
-	return &tokenizer{seed: maphash.MakeSeed(), blockTokens: blockTokens}
+func newTokenizer(blockTokens int, bytesPerToken float64) *tokenizer {
+	return &tokenizer{seed: maphash.MakeSeed(), blockTokens: blockTokens, bytesPerToken: bytesPerToken}
 }
 
 func (t *tokenizer) tokenize(text []byte) prompt {
-	p := prompt{tokens: (len(text) + tokenBytes - 1) / tokenBytes}
-	blockBytes := t.blockTokens * tokenBytes
+	p := prompt{tokens: int(math.Ceil(float64(len(text)) / t.bytesPerToken))}
+	blockBytes := int(math.Round(float64(t.blockTokens) * t.bytesPerToken))
 	var parent [8]byte
 	for off := 0; off+blockBytes <= len(text); off += blockBytes {
 		var h maphash.Hash

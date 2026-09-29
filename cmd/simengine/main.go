@@ -36,6 +36,7 @@ func run() error {
 	model := flag.String("model", "sim-model", "model name to serve")
 	outputTokens := flag.Int("output-tokens", 16, "tokens generated when a request sets no limit")
 	blockTokens := flag.Int("block-tokens", d.BlockTokens, "tokens per KV cache block")
+	bytesPerToken := flag.Float64("bytes-per-token", d.BytesPerToken, "prompt bytes per simulated token")
 	capacity := flag.Int("capacity-blocks", d.CapacityBlocks, "KV cache capacity in blocks")
 	prefillRate := flag.Float64("prefill-rate", d.PrefillTokensPerSecond, "prompt tokens processed per second")
 	step := flag.Duration("step", d.StepOverhead, "fixed duration of one engine step")
@@ -53,6 +54,7 @@ func run() error {
 		Model: *model,
 		Cost: sim.CostModel{
 			BlockTokens:            *blockTokens,
+			BytesPerToken:          *bytesPerToken,
 			CapacityBlocks:         *capacity,
 			PrefillTokensPerSecond: *prefillRate,
 			StepOverhead:           *step,

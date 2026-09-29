@@ -103,6 +103,27 @@ func TestAgentSessionsOfOneAppShareSystemPrompt(t *testing.T) {
 	}
 }
 
+func TestAgentRespectsContextBudget(t *testing.T) {
+	t.Parallel()
+	cfg := smallAgentConfig()
+	cfg.MinTurns, cfg.MaxTurns = 20, 20
+	cfg.MaxContextWords = 300
+	w, err := Agent(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range w.Sessions {
+		if len(s.Turns) == 0 || len(s.Turns) >= 20 {
+			t.Fatalf("session %s has %d turns, want between 1 and 19 under a tight budget", s.ID, len(s.Turns))
+		}
+		for i := range s.Turns {
+			if words := s.Turns[i].PromptWords(); words > cfg.MaxContextWords {
+				t.Fatalf("session %s turn %d has %d words, over the %d-word budget", s.ID, i, words, cfg.MaxContextWords)
+			}
+		}
+	}
+}
+
 func TestAgentConfigValidation(t *testing.T) {
 	t.Parallel()
 	for _, mutate := range []func(*AgentConfig){

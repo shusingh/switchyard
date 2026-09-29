@@ -15,6 +15,11 @@ import (
 type CostModel struct {
 	// BlockTokens is the number of tokens per KV cache block.
 	BlockTokens int
+	// BytesPerToken converts rendered prompt bytes to tokens. The default
+	// matches the benchmark's synthetic text, which Qwen2.5's tokenizer
+	// encodes at one token per word, 5.55 bytes per word on average
+	// (measured with vLLM's /tokenize endpoint).
+	BytesPerToken float64
 	// CapacityBlocks is the KV cache size in blocks.
 	CapacityBlocks int
 	// PrefillTokensPerSecond is prompt-processing throughput.
@@ -38,6 +43,7 @@ type CostModel struct {
 func DefaultCostModel() CostModel {
 	return CostModel{
 		BlockTokens:            16,
+		BytesPerToken:          5.55,
 		CapacityBlocks:         2340,
 		PrefillTokensPerSecond: 14000,
 		StepOverhead:           7 * time.Millisecond,
