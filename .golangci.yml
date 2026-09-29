@@ -37,6 +37,13 @@ linters:
       attr-only: true
       no-global: "all"
 
+  exclusions:
+    rules:
+      # Tests read fixtures from testdata by name; the paths are not input.
+      - path: _test\.go
+        linters: [gosec]
+        text: G304
+
 formatters:
   enable:
     - gofmt
