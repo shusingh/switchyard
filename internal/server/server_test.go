@@ -38,6 +38,7 @@ type harness struct {
 	url     string
 	client  *http.Client
 	engines []*sim.Engine
+	checker *backend.HealthChecker
 }
 
 type harnessOptions struct {
@@ -49,6 +50,7 @@ type harnessOptions struct {
 	admission       *admission.Controller
 	maxRetries      int
 	breaker         backend.BreakerConfig
+	estimator       *scheduler.Estimator
 	// extraBackends are URLs of hand-built servers added after the engines.
 	extraBackends []string
 }
@@ -77,6 +79,7 @@ func newHarness(t *testing.T, opts harnessOptions) *harness {
 		UnhealthyThreshold: 1, HealthyThreshold: 1,
 	}, slog.New(slog.DiscardHandler))
 	t.Cleanup(checker.CloseIdleConnections)
+	h.checker = checker
 	if !opts.skipHealthCheck {
 		checker.CheckAll(context.Background())
 	}
@@ -95,7 +98,7 @@ func newHarness(t *testing.T, opts harnessOptions) *harness {
 	t.Cleanup(px.CloseIdleConnections)
 
 	router := httptest.NewServer(New(Options{
-		Pool: pool, Policy: policy, Proxy: px, Keyer: testKeyer(), Index: testIndex(len(backends)), Estimator: testEstimator(len(backends)),
+		Pool: pool, Policy: policy, Proxy: px, Keyer: testKeyer(), Index: testIndex(len(backends)), Estimator: estimatorOrDefault(opts.estimator, len(backends)),
 		Logger: slog.New(slog.DiscardHandler), MaxRequestBytes: opts.maxRequestBytes,
 		ExplainHeaders:   opts.explainHeaders,
 		Admission:        admissionOrDefault(t, opts.admission),
@@ -125,6 +128,13 @@ func admissionOrDefault(t *testing.T, c *admission.Controller) *admission.Contro
 		t.Fatal(err)
 	}
 	return c
+}
+
+func estimatorOrDefault(e *scheduler.Estimator, backends int) *scheduler.Estimator {
+	if e != nil {
+		return e
+	}
+	return testEstimator(backends)
 }
 
 func testKeyer() *prefix.Keyer { return prefix.NewKeyer(64, 4096) }

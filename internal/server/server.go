@@ -271,7 +271,8 @@ func outcome(r *http.Request, res proxy.Result, err error) backend.Outcome {
 		return backend.OutcomeFailure
 	case err == nil:
 		return backend.OutcomeSuccess
-	case errors.Is(err, proxy.ErrUpstreamUnavailable), errors.Is(err, proxy.ErrRetryableStatus), errors.Is(err, proxy.ErrStreamIdle):
+	case errors.Is(err, proxy.ErrUpstreamUnavailable), errors.Is(err, proxy.ErrRetryableStatus),
+		errors.Is(err, proxy.ErrStreamIdle), errors.Is(err, proxy.ErrUpstreamBroken):
 		return backend.OutcomeFailure
 	default:
 		// Other errors, such as a failed write to the client, say nothing

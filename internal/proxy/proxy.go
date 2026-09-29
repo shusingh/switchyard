@@ -33,6 +33,10 @@ var (
 	// idle timeout and was aborted.
 	ErrStreamIdle = errors.New("upstream stream idle timeout")
 
+	// ErrUpstreamBroken means the backend's response ended abnormally after
+	// it started, for example because the backend crashed mid-stream.
+	ErrUpstreamBroken = errors.New("upstream response broken")
+
 	// ErrRetryableStatus means the backend answered 502, 503, or 504 and
 	// ForwardOptions.HoldRetryableStatus was set, so nothing was written to
 	// the client and the request may be retried elsewhere.
@@ -206,8 +210,12 @@ func (p *Proxy) relayEvents(ctx context.Context, cancel context.CancelCauseFunc,
 			return nil
 		case errors.Is(context.Cause(ctx), ErrStreamIdle):
 			return ErrStreamIdle
-		default:
+		case ctx.Err() != nil:
+			// The client went away; the upstream read failed because the
+			// request was cancelled, not because the backend broke.
 			return fmt.Errorf("read upstream stream: %w", readErr)
+		default:
+			return fmt.Errorf("%w: %w", ErrUpstreamBroken, readErr)
 		}
 	}
 }

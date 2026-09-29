@@ -33,6 +33,9 @@ type Options struct {
 	Cost CostModel
 	// DefaultOutputTokens is generated when a request sets no output limit.
 	DefaultOutputTokens int
+	// Faults injects failures for resilience tests. The zero value injects
+	// none.
+	Faults Faults
 }
 
 // Stats counts requests and cache use.
@@ -41,6 +44,8 @@ type Stats struct {
 	Waiting   int64
 	Completed int64
 	Cancelled int64
+	// Aborted counts streams dropped by an injected crash.
+	Aborted int64
 	// PromptTokens and CachedPromptTokens mirror vLLM's
 	// prefix_cache_queries and prefix_cache_hits counters.
 	PromptTokens       int64
@@ -53,6 +58,8 @@ type Engine struct {
 	opts      Options
 	sched     *scheduler
 	tokenizer *tokenizer
+	faults    *faultState
+	aborted   atomic.Int64
 	completed atomic.Int64
 	cancelled atomic.Int64
 }
@@ -66,6 +73,7 @@ func NewEngine(opts Options) *Engine {
 	return &Engine{
 		opts:      opts,
 		sched:     newScheduler(opts.Cost),
+		faults:    newFaultState(opts.Faults),
 		tokenizer: newTokenizer(opts.Cost.BlockTokens, opts.Cost.BytesPerToken),
 	}
 }
@@ -102,6 +110,7 @@ func (e *Engine) Stats() Stats {
 		Waiting:            e.sched.numWaiting.Load(),
 		Completed:          e.completed.Load(),
 		Cancelled:          e.cancelled.Load(),
+		Aborted:            e.aborted.Load(),
 		PromptTokens:       e.sched.queryTokens.Load(),
 		CachedPromptTokens: e.sched.hitTokens.Load(),
 	}
@@ -113,7 +122,13 @@ func (e *Engine) Handler() http.Handler {
 	mux.HandleFunc("POST "+openai.PathChatCompletions, func(w http.ResponseWriter, r *http.Request) { e.serve(w, r, true) })
 	mux.HandleFunc("POST "+openai.PathCompletions, func(w http.ResponseWriter, r *http.Request) { e.serve(w, r, false) })
 	mux.HandleFunc("GET "+openai.PathModels, e.handleModels)
-	mux.HandleFunc("GET /health", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
+	mux.HandleFunc("GET /health", func(w http.ResponseWriter, _ *http.Request) {
+		if e.faults.unhealthy.Load() {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	})
 	mux.HandleFunc("GET /metrics", e.handleMetrics)
 	mux.HandleFunc("POST /reset_prefix_cache", func(w http.ResponseWriter, _ *http.Request) {
 		e.sched.requestReset()
@@ -160,6 +175,10 @@ func (e *Engine) serve(w http.ResponseWriter, r *http.Request, chat bool) {
 	if need := len(p.blocks) + seq.privateBlocks(e.opts.Cost.BlockTokens); need > e.opts.Cost.CapacityBlocks {
 		openai.WriteError(w, http.StatusBadRequest, openai.ErrTypeInvalidRequest,
 			fmt.Sprintf("request needs %d KV cache blocks; capacity is %d", need, e.opts.Cost.CapacityBlocks))
+		return
+	}
+	if e.faults.roll(e.opts.Faults.ErrorRate) {
+		openai.WriteError(w, http.StatusServiceUnavailable, openai.ErrTypeUnavailable, "injected fault: engine overloaded")
 		return
 	}
 	e.sched.submit(seq)
@@ -229,12 +248,24 @@ func (e *Engine) stream(ctx context.Context, w http.ResponseWriter, seq *sequenc
 		return openai.WriteEvent(w, data) == nil && rc.Flush() == nil
 	}
 
+	abortAt := -1
+	if e.faults.roll(e.opts.Faults.AbortRate) {
+		abortAt = gen.tokens / 2
+	}
 	if gen.chat && !send(gen.roleChunk()) {
 		return eventCancelled
 	}
 	for i := 0; ; i++ {
 		switch ev := await(ctx, seq); ev {
 		case eventToken:
+			if i == abortAt {
+				// Injected crash: release the sequence, then drop the
+				// connection without finishing the stream.
+				seq.cancelled.Store(true)
+				e.sched.notify()
+				e.aborted.Add(1)
+				panic(http.ErrAbortHandler)
+			}
 			if !send(gen.tokenChunk(i)) {
 				return eventCancelled
 			}
