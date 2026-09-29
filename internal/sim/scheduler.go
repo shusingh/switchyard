@@ -10,8 +10,9 @@ import (
 // CostModel sets the simulated engine's capacity and speed.
 //
 // The defaults approximate one of four Qwen2.5-1.5B replicas sharing an
-// RTX 4090 (docs/adr/0009-benchmark-replica-configuration.md) and are
-// recalibrated against the real replicas in Phase 7.
+// RTX 4090 (docs/adr/0009-benchmark-replica-configuration.md). To model other
+// hardware, set PrefillTokensPerSecond and StepOverhead from measured TTFT and
+// time per output token.
 type CostModel struct {
 	// BlockTokens is the number of tokens per KV cache block.
 	BlockTokens int

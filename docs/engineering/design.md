@@ -533,11 +533,13 @@ type Policy interface {
 ```
 
 `Pick` takes no context because it does no I/O; everything it needs is in
-memory. As of Phase 1, `Request` carries the model name and candidates are the
-healthy backends. Phases 3 and 4 extend `Request` with the prompt's block
-hashes and token estimate, and give policies read access to the prefix index
-and load tracker; a per-candidate explanation is returned alongside the pick
-for the explain headers (section 13).
+memory. Candidates are the available backends (healthy, breaker not open),
+whose live load each backend exposes. `Request` carries the model name, the
+prompt's block count, the number of leading blocks believed cached on each
+backend (computed by the server from the prefix index before `Pick`), and the
+estimated prompt tokens. Policies that predict TTFT record the prediction in
+`Request.PredictedTTFT`; for other policies the server computes the same
+prediction, so every policy reports prediction error (section 13).
 
 | Policy | Purpose |
 |---|---|
