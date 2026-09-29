@@ -445,22 +445,51 @@ holds 4M entries, roughly 300 to 400 MB in the worst case. Default budgets are
 far lower; the budget is a config value with a documented formula, and the index
 exports its size as a metric.
 
-### 7.4 Precise index (phase 8, stretch)
+### 7.4 Precise index (`routing.prefix_mode: precise`)
 
-Driven by vLLM KV events instead of routing history:
+Driven by the engines' KV cache events instead of routing history. The spike
+that gated this mode passed: Go reproduces vLLM's block hashes bit for bit.
 
-1. Subscribe to each replica's ZMQ publisher (pure-Go `github.com/go-zeromq/zmq4`,
-   no libzmq) and decode msgpack `KVEventBatch` messages.
-2. Obtain token IDs for a request via the replica's `/tokenize` endpoint
-   (renders the chat template server-side), then compute vLLM-compatible block
-   hashes with `--prefix-caching-hash-algo sha256_cbor` and a fixed hash seed.
-3. Keep speculative entries for routed-but-not-yet-evented blocks, expiring them
-   when real events arrive or after a short TTL.
+**Keys.** vLLM hashes each full block of 16 tokens as SHA-256 over the
+canonical CBOR encoding of `(parent hash, block token IDs, extra keys)`,
+starting from the hash of the string `"vllm-none-hash"`
+(`--prefix-caching-hash-algo sha256_cbor`; vLLM's default `sha256` hashes a
+Python pickle and cannot be reproduced elsewhere). `prefix.VLLMBlockHashes`
+implements this with a hand-written encoder for the small CBOR subset
+involved. Golden vectors produced by vLLM's own functions, covering every CBOR
+integer width, are checked in `internal/prefix/testdata`. Index keys are the
+low 64 bits of each hash, which is also what vLLM publishes when
+`VLLM_KV_EVENTS_USE_INT_BLOCK_HASHES` is set.
 
-Main risks: exact hash compatibility across vLLM versions, and the added
-latency of a tokenize round trip. Phase 8 starts with a spike that proves hash
-compatibility before any integration work. If the spike fails, Switchyard stays
-approximate and says so plainly in the README.
+**Tokens.** The router cannot tokenize by itself without the model's
+tokenizer and chat template, so it asks an available engine through
+`POST /tokenize` (rotating across engines), sending only the prompt-shaping
+fields plus `add_generation_prompt: true`, as chat completions do. If
+tokenizing fails, the request is routed with no prefix information rather
+than failed. Cost is exported as `switchyard_tokenize_seconds`.
+
+**Events.** One `kvevents.Subscriber` per backend connects to its ZeroMQ
+publisher (pure-Go `github.com/go-zeromq/zmq4`, ADR 0010). Messages are
+`(topic, 8-byte big-endian sequence, msgpack batch)`; a batch is
+`[timestamp, events, rank?]` and each event a map tagged by class. Stored
+blocks are inserted into the index, removed blocks forgotten, and a clear
+empties the backend's entries. Only GPU-tier blocks are tracked.
+
+**Trust.** Events published while a subscriber is disconnected are lost, so
+the backend's entries are cleared after every (re)connection, on any gap in
+sequence numbers (which also catches a publisher restart), and on a batch
+that cannot be decoded. Routing still inserts speculative entries, covering
+the few milliseconds before the engine's own event arrives; `BlockRemoved`
+corrects any that turn out wrong.
+
+**Hardening.** The batch decoder walks the payload with msgpack's streaming
+API and checks every declared length against the payload size before
+allocating. Fuzzing found that decoding into generic values let a 10-byte
+payload declare a 1.9-billion-entry map; that input is a regression test.
+
+**Budget.** The index budget is the engines' real block count
+(`kv_capacity_tokens / engine_block_tokens`), and the estimator counts cached
+tokens in engine blocks.
 
 ## 8. Load signals
 
